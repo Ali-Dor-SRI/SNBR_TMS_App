@@ -18,6 +18,12 @@ KEY_MEM_DIR = "mem_dir"
 KEY_CSP_DIR = "csp_dir"
 KEY_CMAP_DIR = "cmap_dir"
 KEY_CSV_FILE = "csv_file"
+# Per-field "scan subfolders" toggle. Saved when the user ticks "Save as
+# default" for that section. Default OFF — only the selected folders are
+# scanned; the user opts in to recursing into subdirectories.
+KEY_MEM_RECURSIVE = "mem_recursive"
+KEY_CSP_RECURSIVE = "csp_recursive"
+KEY_CMAP_RECURSIVE = "cmap_recursive"
 KEY_EXPORT_CSV = "export_csv_path"
 KEY_EXPORT_PDF = "export_pdf_path"
 KEY_SYNC_PAIRS = "sync_pairs"
@@ -72,6 +78,9 @@ def load_defaults() -> dict[str, str]:
         KEY_CSP_DIR: raw.get(KEY_CSP_DIR, ""),
         KEY_CMAP_DIR: raw.get(KEY_CMAP_DIR, ""),
         KEY_CSV_FILE: raw.get(KEY_CSV_FILE, ""),
+        KEY_MEM_RECURSIVE: raw.get(KEY_MEM_RECURSIVE, False),
+        KEY_CSP_RECURSIVE: raw.get(KEY_CSP_RECURSIVE, False),
+        KEY_CMAP_RECURSIVE: raw.get(KEY_CMAP_RECURSIVE, False),
         KEY_EXPORT_CSV: raw.get(KEY_EXPORT_CSV, ""),
         KEY_EXPORT_PDF: raw.get(KEY_EXPORT_PDF, ""),
         KEY_SYNC_PAIRS: raw.get(KEY_SYNC_PAIRS, []),

@@ -426,12 +426,15 @@ def merge_cmap_into_mem(
 
 
 def _apply_cmap_merge(
-    df: pd.DataFrame, cmap_dir: str | Path | list[str | Path] | None,
+    df: pd.DataFrame,
+    cmap_dir: str | Path | list[str | Path] | None,
+    *,
+    recursive: bool = True,
 ) -> pd.DataFrame:
     """Helper — parse CMAP files (if any) and merge into *df*."""
     if not normalize_dirs(cmap_dir):
         return df
-    records = parse_cmap_directory(cmap_dir)
+    records = parse_cmap_directory(cmap_dir, recursive=recursive)
     if not records:
         return df
     cmap_df = build_cmap_dataframe(records)
@@ -556,6 +559,10 @@ def build_combined_dataframe(
     mem_dir: str | Path | list[str | Path],
     csp_dir: str | Path | list[str | Path] | None = None,
     cmap_dir: str | Path | list[str | Path] | None = None,
+    *,
+    mem_recursive: bool = True,
+    csp_recursive: bool = True,
+    cmap_recursive: bool = True,
 ) -> pd.DataFrame:
     """Parse all MEM (and optionally CSP / CMAP) files and return one merged DataFrame.
 
@@ -564,22 +571,24 @@ def build_combined_dataframe(
     mem_dir : path or list of paths
         Folder(s) containing .MEM files for the main TMS measures.  When a
         list is given, files are collected from every folder.
-    csp_dir : path, optional
-        Folder containing CSP .MEM files.  When ``None``, CSP columns remain
-        empty (no merge).
-    cmap_dir : path, optional
-        Folder containing motor nerve-conduction study .pdf / .docx files.
-        When ``None``, the ``CMAP_table`` column is left empty.
+    csp_dir, cmap_dir : path or list of paths, optional
+        Folder(s) for CSP / CMAP files.  When ``None``, those columns are
+        left empty (no merge).
+    mem_recursive, csp_recursive, cmap_recursive : bool
+        When ``True`` (default) subfolders are searched too.  Set ``False``
+        to scan only files directly inside the selected folders.
     """
-    mem_records = parse_mem_directory(mem_dir, exclude_dirs=[csp_dir, cmap_dir])
+    mem_records = parse_mem_directory(
+        mem_dir, exclude_dirs=[csp_dir, cmap_dir], recursive=mem_recursive,
+    )
     mem_df = build_mem_dataframe(mem_records)
 
-    if iter_files(csp_dir, "*.MEM"):
-        csp_records = parse_csp_directory(csp_dir)
+    if iter_files(csp_dir, "*.MEM", recursive=csp_recursive):
+        csp_records = parse_csp_directory(csp_dir, recursive=csp_recursive)
         csp_df = build_csp_dataframe(csp_records)
         mem_df = merge_csp_into_mem(mem_df, csp_df)
 
-    mem_df = _apply_cmap_merge(mem_df, cmap_dir)
+    mem_df = _apply_cmap_merge(mem_df, cmap_dir, recursive=cmap_recursive)
 
     return _normalize_mem_dataframe(_coalesce_same_session_rows(mem_df))
 
@@ -589,6 +598,10 @@ def build_combined_dataframe_incremental(
     csp_dir: str | Path | list[str | Path] | None = None,
     existing_csv: str | Path | None = None,
     cmap_dir: str | Path | list[str | Path] | None = None,
+    *,
+    mem_recursive: bool = True,
+    csp_recursive: bool = True,
+    cmap_recursive: bool = True,
 ) -> pd.DataFrame:
     """Build a DataFrame, only parsing .MEM files not already in *existing_csv*.
 
@@ -628,7 +641,9 @@ def build_combined_dataframe_incremental(
         shown = ", ".join(str(r) for r in mem_roots) or "(none provided)"
         raise FileNotFoundError(f"MEM folder does not exist: {shown}")
 
-    mem_files = iter_mem_files(mem_roots, exclude_dirs=[csp_dir, cmap_dir])
+    mem_files = iter_mem_files(
+        mem_roots, exclude_dirs=[csp_dir, cmap_dir], recursive=mem_recursive,
+    )
     if not mem_files:
         shown = ", ".join(str(r) for r in mem_roots)
         raise FileNotFoundError(f"No .MEM files found in: {shown}")
@@ -638,7 +653,9 @@ def build_combined_dataframe_incremental(
     # Also list CSP folder contents so CSP-appended rows in the existing CSV
     # aren't mistakenly flagged as orphans below (their source_file is a CSP
     # filename, not a MEM one).
-    csp_filenames = {f.name for f in iter_files(csp_dir, "*.MEM")}
+    csp_filenames = {
+        f.name for f in iter_files(csp_dir, "*.MEM", recursive=csp_recursive)
+    }
 
     # ---- Load existing CSV (if any) ----
     if existing_csv is not None and Path(existing_csv).exists():
@@ -699,13 +716,13 @@ def build_combined_dataframe_incremental(
         combined = kept_df
 
     # ---- Re-merge CSP data ----
-    if iter_files(csp_dir, "*.MEM"):
-        csp_records = parse_csp_directory(csp_dir)
+    if iter_files(csp_dir, "*.MEM", recursive=csp_recursive):
+        csp_records = parse_csp_directory(csp_dir, recursive=csp_recursive)
         csp_df = build_csp_dataframe(csp_records)
         combined = merge_csp_into_mem(combined, csp_df)
 
     # ---- Re-merge CMAP data ----
-    combined = _apply_cmap_merge(combined, cmap_dir)
+    combined = _apply_cmap_merge(combined, cmap_dir, recursive=cmap_recursive)
 
     combined = _coalesce_same_session_rows(_normalize_mem_dataframe(combined))
     combined = _normalize_mem_dataframe(combined)

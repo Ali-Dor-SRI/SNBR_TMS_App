@@ -6,6 +6,7 @@ from pathlib import Path
 
 from core.user_settings import (
     save_defaults, KEY_MEM_DIR, KEY_CSP_DIR, KEY_CMAP_DIR, KEY_CSV_FILE,
+    KEY_MEM_RECURSIVE, KEY_CSP_RECURSIVE, KEY_CMAP_RECURSIVE,
 )
 from gui.theme import (
     FONT_TITLE, FONT_HEADING, FONT_BODY, FONT_SMALL, FONT_SUBTITLE, FONT_BUTTON,
@@ -37,6 +38,13 @@ class FilePanel(ctk.CTkFrame):
             "mem": [], "csp": [], "cmap": [],
         }
         self._dir_lists: dict[str, ctk.CTkFrame] = {}
+        # Per-field "scan subfolders" toggle vars + warning labels.
+        self._recursive_vars: dict[str, ctk.BooleanVar] = {
+            "mem": ctk.BooleanVar(value=False),
+            "csp": ctk.BooleanVar(value=False),
+            "cmap": ctk.BooleanVar(value=False),
+        }
+        self._recursive_helpers: dict[str, ctk.CTkLabel] = {}
 
         self._build_ui()
         self._load_defaults()
@@ -48,6 +56,11 @@ class FilePanel(ctk.CTkFrame):
         self._set_dir_paths("csp", paths["csp_path"])
         self._set_dir_paths("cmap", paths.get("cmap_path", []))
         self._csv_var.set(paths["csv_path"])
+        for name in ("mem", "csp", "cmap"):
+            self._recursive_vars[name].set(
+                bool(paths.get(f"{name}_recursive", False))
+            )
+            self._update_recursive_helper(name)
 
     def _set_dir_paths(self, name: str, value):
         """Populate a field's folder rows from a list (or legacy single string)."""
@@ -230,6 +243,38 @@ class FilePanel(ctk.CTkFrame):
             font=FONT_SMALL,
         ).grid(row=0, column=2, sticky="e")
 
+        # "Include subfolders" toggle + inline warning helper. The helper is
+        # only shown while the toggle is on, so users see the cost note exactly
+        # when it applies.
+        ctk.CTkCheckBox(
+            frame, text="Include subfolders",
+            variable=self._recursive_vars[name],
+            font=FONT_SMALL,
+            command=lambda n=name: self._update_recursive_helper(n),
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        helper_label = ctk.CTkLabel(
+            frame,
+            text=(
+                "Scanning subfolders may take longer on large folder trees."
+            ),
+            font=FONT_SMALL, text_color="#F39C12", anchor="w",
+            wraplength=560, justify="left",
+        )
+        helper_label.grid(row=5, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        helper_label.grid_remove()
+        self._recursive_helpers[name] = helper_label
+
+    def _update_recursive_helper(self, name: str):
+        """Show or hide the 'may take longer' warning for field *name*."""
+        helper = self._recursive_helpers.get(name)
+        if helper is None:
+            return
+        if self._recursive_vars[name].get():
+            helper.grid()
+        else:
+            helper.grid_remove()
+
     def _add_dir_row(self, name: str, path: str = ""):
         """Append one folder row (entry + Browse + Remove) to field *name*."""
         rows = self._dir_rows[name]
@@ -385,11 +430,17 @@ class FilePanel(ctk.CTkFrame):
         mem_paths = self._collect_dir_paths("mem")
         csp_paths = self._collect_dir_paths("csp")
         cmap_paths = self._collect_dir_paths("cmap")
+        mem_rec = self._recursive_vars["mem"].get()
+        csp_rec = self._recursive_vars["csp"].get()
+        cmap_rec = self._recursive_vars["cmap"].get()
         self._controller.set_paths(
             mem_path=mem_paths,
             csp_path=csp_paths,
             cmap_path=cmap_paths,
             csv_path=self._csv_var.get().strip(),
+            mem_recursive=mem_rec,
+            csp_recursive=csp_rec,
+            cmap_recursive=cmap_rec,
         )
 
         errors = self._controller.validate_paths()
@@ -397,14 +448,19 @@ class FilePanel(ctk.CTkFrame):
             self._error_var.set("\n".join(errors))
             return
 
-        # Persist checked paths as defaults for next session.
+        # Persist checked paths (and their recursion flags) as defaults for
+        # next session. save_defaults pops keys when the value is falsy, so
+        # a False toggle simply clears any previously-saved override.
         to_save = {}
         if self._save_mem.get():
             to_save[KEY_MEM_DIR] = mem_paths
+            to_save[KEY_MEM_RECURSIVE] = mem_rec
         if self._save_csp.get():
             to_save[KEY_CSP_DIR] = csp_paths
+            to_save[KEY_CSP_RECURSIVE] = csp_rec
         if self._save_cmap.get():
             to_save[KEY_CMAP_DIR] = cmap_paths
+            to_save[KEY_CMAP_RECURSIVE] = cmap_rec
         if self._save_csv.get():
             to_save[KEY_CSV_FILE] = self._csv_var.get().strip()
         if to_save:

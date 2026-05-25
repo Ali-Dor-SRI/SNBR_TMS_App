@@ -355,18 +355,21 @@ def parse_cmap_file(filepath: str | Path) -> dict:
 
 def parse_cmap_directory(
     input_dir: str | Path | list[str | Path] | None,
+    recursive: bool = True,
 ) -> list[dict]:
-    """Parse every .pdf/.docx file in *input_dir* (recursive) and return records.
+    """Parse every .pdf/.docx file in *input_dir* and return records.
 
-    *input_dir* may be a single directory or a list of directories.  Files
-    that yield no usable rows are silently skipped. Temporary Word lock
-    files (``~$...docx``) are ignored.
+    *input_dir* may be a single directory or a list of directories.  When
+    *recursive* is ``True`` (default) subfolders are searched too; when
+    ``False`` only files directly inside each root are parsed.  Files that
+    yield no usable rows are silently skipped. Temporary Word lock files
+    (``~$...docx``) are ignored.
     """
     if not normalize_dirs(input_dir):
         return []
 
     records: list[dict] = []
-    for path in iter_files(input_dir, "*"):
+    for path in iter_files(input_dir, "*", recursive=recursive):
         if path.name.startswith("~$"):
             continue
         if path.suffix.lower() not in {".pdf", ".docx"}:

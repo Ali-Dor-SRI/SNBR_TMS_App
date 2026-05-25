@@ -567,11 +567,14 @@ def normalize_dirs(value) -> list[Path]:
 def iter_files(
     input_dir: str | Path | list[str | Path] | None,
     pattern: str = "*.MEM",
+    recursive: bool = True,
 ) -> list[Path]:
-    """Recursively list files matching *pattern* across one or more dirs.
+    """List files matching *pattern* across one or more dirs.
 
     *input_dir* may be a single directory or a (possibly nested) list of
     directories, so callers can collect files stored in several locations.
+    When *recursive* is ``True`` (default), subfolders are searched too;
+    when ``False``, only files directly inside each root are returned.
     Results are de-duplicated by resolved path (overlapping/parent+child
     selections are not returned twice) and missing directories are skipped.
     """
@@ -580,7 +583,8 @@ def iter_files(
     for root in normalize_dirs(input_dir):
         if not root.is_dir():
             continue
-        for path in sorted(root.rglob(pattern)):
+        glob_iter = root.rglob(pattern) if recursive else root.glob(pattern)
+        for path in sorted(glob_iter):
             if not path.is_file():
                 continue
             try:
@@ -597,19 +601,21 @@ def iter_files(
 def iter_mem_files(
     input_dir: str | Path | list[str | Path] | None,
     exclude_dirs: list[str | Path | None] | None = None,
+    recursive: bool = True,
 ) -> list[Path]:
-    """Return every ``*.MEM`` path under *input_dir*, searched recursively.
+    """Return every ``*.MEM`` path under *input_dir*.
 
     *input_dir* may be a single directory or a list of directories — files
     are collected from all of them so the user can pull MEM files stored in
-    different locations.  Selecting a folder parses every .MEM file beneath
-    it, including those in subfolders.  Files are de-duplicated by resolved
-    path (overlapping selections won't be parsed twice), and any file inside
-    one of *exclude_dirs* is skipped — used to keep the CSP directory (a
-    subfolder of the MEM directory in typical lab layouts) out of the MEM
-    parse, since CSP files use a different format handled by ``CSP_parser``.
+    different locations.  When *recursive* is ``True`` (default), subfolders
+    are searched too; when ``False``, only files directly inside each root
+    are returned.  Files are de-duplicated by resolved path (overlapping
+    selections won't be parsed twice), and any file inside one of
+    *exclude_dirs* is skipped — used to keep the CSP directory (a subfolder
+    of the MEM directory in typical lab layouts) out of the MEM parse,
+    since CSP files use a different format handled by ``CSP_parser``.
     """
-    mem_files = iter_files(input_dir, "*.MEM")
+    mem_files = iter_files(input_dir, "*.MEM", recursive=recursive)
 
     excluded: list[Path] = []
     for d in normalize_dirs(exclude_dirs):
@@ -635,19 +641,21 @@ def iter_mem_files(
 def parse_mem_directory(
     input_dir: str | Path | list[str | Path] | None,
     exclude_dirs: list[str | Path | None] | None = None,
+    recursive: bool = True,
 ) -> list[dict]:
-    """Parse all .MEM files under *input_dir* (recursively) and return record dicts.
+    """Parse all .MEM files under *input_dir* and return record dicts.
 
-    *input_dir* may be a single directory or a list of directories.
-    Subfolders are searched too.  Each dict has a ``source_file`` key set to
-    the filename (stem + extension).  Pass *exclude_dirs* to skip subtrees
-    such as the CSP directory.
+    *input_dir* may be a single directory or a list of directories.  When
+    *recursive* is ``True`` (default) subfolders are searched too; when
+    ``False`` only files directly inside each root are parsed.  Each dict
+    has a ``source_file`` key set to the filename (stem + extension).
+    Pass *exclude_dirs* to skip subtrees such as the CSP directory.
     """
     roots = normalize_dirs(input_dir)
     if not roots:
         raise FileNotFoundError("No MEM directory was provided")
 
-    mem_files = iter_mem_files(roots, exclude_dirs)
+    mem_files = iter_mem_files(roots, exclude_dirs, recursive=recursive)
     if not mem_files:
         shown = ", ".join(str(r) for r in roots)
         raise FileNotFoundError(f"No .MEM files found in: {shown}")

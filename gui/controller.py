@@ -15,6 +15,7 @@ from core.user_settings import (
     load_defaults,
     save_defaults,
     KEY_MEM_DIR, KEY_CSP_DIR, KEY_CMAP_DIR, KEY_CSV_FILE,
+    KEY_MEM_RECURSIVE, KEY_CSP_RECURSIVE, KEY_CMAP_RECURSIVE,
     KEY_EXPORT_CSV, KEY_EXPORT_PDF, KEY_SYNC_PAIRS,
     KEY_REDCAP_DATA_DIR, KEY_REDCAP_DICT_DIR,
     KEY_REDCAP_TEMPLATE_DIR, KEY_REDCAP_EXPORT_DIR,
@@ -63,6 +64,10 @@ class AppController:
         self._mem_paths: list[str] = []
         self._csp_paths: list[str] = []
         self._cmap_paths: list[str] = []
+        # Per-field "scan subfolders" toggle. Default OFF — recursion is opt-in.
+        self._mem_recursive: bool = False
+        self._csp_recursive: bool = False
+        self._cmap_recursive: bool = False
         self._csv_path: str = ""  # a *file* path, not a directory
         self._dataframe: pd.DataFrame | None = None
         self._quick_start_message: str = ""
@@ -84,6 +89,10 @@ class AppController:
             self._csp_paths = [str(CSP_DIR)]
 
         self._cmap_paths = _as_path_list(saved.get(KEY_CMAP_DIR, ""))
+
+        self._mem_recursive = bool(saved.get(KEY_MEM_RECURSIVE, False))
+        self._csp_recursive = bool(saved.get(KEY_CSP_RECURSIVE, False))
+        self._cmap_recursive = bool(saved.get(KEY_CMAP_RECURSIVE, False))
 
         self._csv_path = saved.get(KEY_CSV_FILE, "")
         if not self._csv_path:
@@ -112,6 +121,9 @@ class AppController:
         self._mem_paths = []
         self._csp_paths = []
         self._cmap_paths = []
+        self._mem_recursive = False
+        self._csp_recursive = False
+        self._cmap_recursive = False
         self._csv_path = ""
         self._default_export_csv = ""
         self._default_export_pdf = ""
@@ -119,25 +131,40 @@ class AppController:
     def set_paths(
         self, mem_path, csp_path="", csv_path: str = "",
         cmap_path="",
+        *,
+        mem_recursive: bool | None = None,
+        csp_recursive: bool | None = None,
+        cmap_recursive: bool | None = None,
     ):
         """Save the user-selected import paths.
 
         *mem_path*, *csp_path* and *cmap_path* may each be a single directory
         string or a list of directories (the user can pick files from several
-        locations).  *csv_path* is always a single archive file.
+        locations).  *csv_path* is always a single archive file.  The
+        ``*_recursive`` flags toggle whether subfolders are scanned for each
+        field; ``None`` means leave the existing value unchanged.
         """
         self._mem_paths = _as_path_list(mem_path)
         self._csp_paths = _as_path_list(csp_path)
         self._cmap_paths = _as_path_list(cmap_path)
         self._csv_path = csv_path
+        if mem_recursive is not None:
+            self._mem_recursive = bool(mem_recursive)
+        if csp_recursive is not None:
+            self._csp_recursive = bool(csp_recursive)
+        if cmap_recursive is not None:
+            self._cmap_recursive = bool(cmap_recursive)
 
     def get_paths(self) -> dict:
-        """Return the current import paths (dir fields are lists of dirs)."""
+        """Return the current import paths and per-field recursion flags."""
         return {
             "mem_path": list(self._mem_paths),
             "csp_path": list(self._csp_paths),
             "cmap_path": list(self._cmap_paths),
             "csv_path": self._csv_path,
+            "mem_recursive": self._mem_recursive,
+            "csp_recursive": self._csp_recursive,
+            "cmap_recursive": self._cmap_recursive,
         }
 
     def validate_paths(self) -> list[str]:
@@ -175,7 +202,9 @@ class AppController:
         """
         df = load_existing_csv(self._csv_path)
         if self._cmap_paths:
-            df = _apply_cmap_merge(df, self._cmap_paths)
+            df = _apply_cmap_merge(
+                df, self._cmap_paths, recursive=self._cmap_recursive,
+            )
         self._dataframe = df
         return df
 
@@ -186,6 +215,9 @@ class AppController:
             csp_dir=self._csp_paths or None,
             existing_csv=self._csv_path or None,
             cmap_dir=self._cmap_paths or None,
+            mem_recursive=self._mem_recursive,
+            csp_recursive=self._csp_recursive,
+            cmap_recursive=self._cmap_recursive,
         )
         self._dataframe = df
         return df
@@ -199,6 +231,7 @@ class AppController:
             for p in iter_mem_files(
                 self._mem_paths,
                 exclude_dirs=[self._csp_paths or None, self._cmap_paths or None],
+                recursive=self._mem_recursive,
             )
         }
         if "source_file" not in df.columns:
@@ -1149,6 +1182,9 @@ class AppController:
                 csp_path=saved.get(KEY_CSP_DIR, ""),
                 cmap_path=saved.get(KEY_CMAP_DIR, ""),
                 csv_path=saved.get(KEY_CSV_FILE, ""),
+                mem_recursive=bool(saved.get(KEY_MEM_RECURSIVE, False)),
+                csp_recursive=bool(saved.get(KEY_CSP_RECURSIVE, False)),
+                cmap_recursive=bool(saved.get(KEY_CMAP_RECURSIVE, False)),
             )
             errors = self.validate_paths()
             if errors:
