@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use this software, its models, or its results, please cite it as below."
+title: "SNBR TMS App: Transcranial Magnetic Stimulation Data Parser and Report Generator"
+abstract: >-
+  A Windows desktop application for the ALS Neurophysiology and Neuromodulation Lab
+  that parses transcranial magnetic stimulation (TMS) measurement files (.MEM) produced
+  by Qtrack sessions, extracts TMS metrics (such as resting motor threshold, short-interval
+  intracortical inhibition, and cortical silent period), builds analysis-ready dataframes,
+  and generates PDF reports that benchmark participants against healthy-control and ALS
+  reference groups. Runs fully offline.
+type: software
+authors:
+  - family-names: Doroodchi
+    given-names: Ali
+    affiliation: "ALS Neurophysiology and Neuromodulation Lab"
+version: "2.3.0"
+date-released: "2026-07-08"
+license: PolyForm-Noncommercial-1.0.0
+repository-code: "https://github.com/Ali-Dor-SRI/SNBR_TMS_App"
+url: "https://github.com/Ali-Dor-SRI/SNBR_TMS_App"
+keywords:
+  - transcranial magnetic stimulation
+  - TMS
+  - amyotrophic lateral sclerosis
+  - ALS
+  - neurophysiology
+  - cortical excitability
+  - clinical research software
