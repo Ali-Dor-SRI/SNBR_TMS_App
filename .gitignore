@@ -1,0 +1,33 @@
+# ── Python ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# ── Virtual environments ───────────────────────────────
+.venv/
+.venv312/
+venv/
+env/
+
+# ── PyInstaller / build output ─────────────────────────
+#    (macos_build/ holds the mac build scripts and is intentionally kept)
+build/
+dist/
+dist_macos/
+
+# ── User-specific settings (machine paths, email, exclusions) ──
+core/saved_defaults.json
+
+# ── Runtime-generated sync log ─────────────────────────
+back_up_sync/sync_log.txt
+
+# ── Generated test outputs (reports, parsed CSVs, previews) ──
+tests/output/
+
+# ── OS / editor cruft ──────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*~

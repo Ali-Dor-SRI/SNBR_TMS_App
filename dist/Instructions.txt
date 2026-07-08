@@ -1,4 +1,0 @@
-Instructions: 
-
-1. Copy the SNBR_TMS_App folder into a local directory. 
-2. Run SNBR_TMS_App.exe. Running this for the first time may take a minute. 

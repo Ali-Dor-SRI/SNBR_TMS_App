@@ -1,4 +1,0 @@
-# This folder receives the macOS build output (SNBR_TMS_App.app).
-# Kept in version control so the path exists before the first build.
-# The .app itself is produced by macos_build/build.sh and should not
-# be committed.

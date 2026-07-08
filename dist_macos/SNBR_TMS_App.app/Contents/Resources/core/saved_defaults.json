@@ -1,9 +1,0 @@
-{
-  "mem_dir": "C:/Users/Ali D/Desktop/Claude_App/1_Raw_Data/SNBR_MEM",
-  "csp_dir": "C:/Users/Ali D/Desktop/Claude_App/1_Raw_Data/SNBR_CSP_RAW",
-  "cmap_dir": "C:/Users/Ali D/Desktop/EMGRQ",
-  "redcap_data_dir": "C:/Users/Ali D/Desktop/Claude_App/1_Raw_Data/SNBR_REDCap/Current_df",
-  "redcap_dict_dir": "C:/Users/Ali D/Desktop/Claude_App/1_Raw_Data/SNBR_REDCap/Dictionary",
-  "redcap_template_dir": "C:/Users/Ali D/Desktop/Claude_App/1_Raw_Data/SNBR_REDCap/Import_template",
-  "redcap_export_dir": "C:/Users/Ali D/Desktop/Claude_App/1_Raw_Data/SNBR_REDCap/Export"
-}
