@@ -8,10 +8,39 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 
-_SETTINGS_FILE = Path(__file__).resolve().parent / "saved_defaults.json"
+_APP_NAME = "SNBR_TMS_App"
+
+
+def _resolve_settings_file() -> Path:
+    """Return where user settings are read from / written to.
+
+    In development the file lives next to this module (repo-local). In a frozen
+    PyInstaller build ``__file__`` points inside the bundle — which for a
+    ``--onefile`` exe is a temporary directory that is wiped on exit — so
+    settings would never persist. When frozen we therefore write to a stable,
+    per-user, writable location instead:
+
+    * Windows: ``%APPDATA%\\SNBR_TMS_App\\saved_defaults.json``
+    * macOS:   ``~/Library/Application Support/SNBR_TMS_App/saved_defaults.json``
+    * Linux:   ``$XDG_CONFIG_HOME/SNBR_TMS_App/saved_defaults.json``
+    """
+    if not getattr(sys, "frozen", False):
+        return Path(__file__).resolve().parent / "saved_defaults.json"
+
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA") or str(Path.home())
+        return Path(base) / _APP_NAME / "saved_defaults.json"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / _APP_NAME / "saved_defaults.json"
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / _APP_NAME / "saved_defaults.json"
+
+
+_SETTINGS_FILE = _resolve_settings_file()
 
 # Keys used in the JSON file.
 KEY_MEM_DIR = "mem_dir"
@@ -27,6 +56,13 @@ KEY_CMAP_RECURSIVE = "cmap_recursive"
 KEY_EXPORT_CSV = "export_csv_path"
 KEY_EXPORT_PDF = "export_pdf_path"
 KEY_SYNC_PAIRS = "sync_pairs"
+# Per-participant tests excluded from cohort averages (and blanked in the
+# exported CSV). Stored as a mapping of participant ID (string) -> list of
+# test keys, e.g. {"123": ["t_sicf", "rmt"]}.
+KEY_EXCLUDED_MEASUREMENTS = "excluded_measurements"
+# Legacy whole-participant exclusion list (kept for one-way migration into
+# KEY_EXCLUDED_MEASUREMENTS). Stored as a list of integers.
+KEY_EXCLUDED_PARTICIPANTS = "excluded_participants"
 KEY_REDCAP_DATA_DIR = "redcap_data_dir"
 KEY_REDCAP_DICT_DIR = "redcap_dict_dir"
 KEY_REDCAP_TEMPLATE_DIR = "redcap_template_dir"
@@ -84,6 +120,8 @@ def load_defaults() -> dict[str, str]:
         KEY_EXPORT_CSV: raw.get(KEY_EXPORT_CSV, ""),
         KEY_EXPORT_PDF: raw.get(KEY_EXPORT_PDF, ""),
         KEY_SYNC_PAIRS: raw.get(KEY_SYNC_PAIRS, []),
+        KEY_EXCLUDED_MEASUREMENTS: raw.get(KEY_EXCLUDED_MEASUREMENTS, {}),
+        KEY_EXCLUDED_PARTICIPANTS: raw.get(KEY_EXCLUDED_PARTICIPANTS, []),
         KEY_REDCAP_DATA_DIR: raw.get(KEY_REDCAP_DATA_DIR, ""),
         KEY_REDCAP_DICT_DIR: raw.get(KEY_REDCAP_DICT_DIR, ""),
         KEY_REDCAP_TEMPLATE_DIR: raw.get(KEY_REDCAP_TEMPLATE_DIR, ""),

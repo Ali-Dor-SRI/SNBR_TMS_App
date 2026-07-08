@@ -8,6 +8,7 @@ matplotlib.use("Agg")  # noqa: E402 — must precede any pyplot import
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from core.config import MEM_DIR, CSP_DIR
@@ -17,6 +18,7 @@ from core.user_settings import (
     KEY_MEM_DIR, KEY_CSP_DIR, KEY_CMAP_DIR, KEY_CSV_FILE,
     KEY_MEM_RECURSIVE, KEY_CSP_RECURSIVE, KEY_CMAP_RECURSIVE,
     KEY_EXPORT_CSV, KEY_EXPORT_PDF, KEY_SYNC_PAIRS,
+    KEY_EXCLUDED_MEASUREMENTS, KEY_EXCLUDED_PARTICIPANTS,
     KEY_REDCAP_DATA_DIR, KEY_REDCAP_DICT_DIR,
     KEY_REDCAP_TEMPLATE_DIR, KEY_REDCAP_EXPORT_DIR,
     KEY_REDCAP_XLSX_DIR,
@@ -72,6 +74,11 @@ class AppController:
         self._dataframe: pd.DataFrame | None = None
         self._quick_start_message: str = ""
         self._last_exported_pdf: str = ""
+        # Per-participant tests excluded from cohort averages and CSV export:
+        # {participant_id: {test_key, ...}}. Loaded from saved defaults at
+        # startup; mutated in-session by the exclusion panel and only
+        # re-persisted when the user saves.
+        self._excluded_tests: dict[int, set[str]] = {}
 
         self._apply_defaults()
 
@@ -104,6 +111,20 @@ class AppController:
         self._default_export_csv = saved.get(KEY_EXPORT_CSV, "")
         self._default_export_pdf = saved.get(KEY_EXPORT_PDF, "")
 
+        # Excluded tests — apply saved defaults to the active session.
+        self._excluded_tests = self._coerce_excluded_map(
+            saved.get(KEY_EXCLUDED_MEASUREMENTS, {})
+        )
+        # One-way migration: a legacy whole-participant exclusion list means
+        # "exclude every test" for each of those participants.
+        if not self._excluded_tests:
+            legacy_ids = self._coerce_id_list(
+                saved.get(KEY_EXCLUDED_PARTICIPANTS, [])
+            )
+            if legacy_ids:
+                all_tests = set(self.EXCLUDABLE_TEST_KEYS)
+                self._excluded_tests = {pid: set(all_tests) for pid in legacy_ids}
+
     def get_default_export_paths(self) -> dict[str, str]:
         return {
             "csv": getattr(self, "_default_export_csv", ""),
@@ -127,6 +148,7 @@ class AppController:
         self._csv_path = ""
         self._default_export_csv = ""
         self._default_export_pdf = ""
+        self._excluded_tests = {}
 
     def set_paths(
         self, mem_path, csp_path="", csv_path: str = "",
@@ -193,15 +215,17 @@ class AppController:
 
     # ── DataFrame operations ───────────────────────────────
 
-    def load_csv_dataframe(self) -> pd.DataFrame:
+    def load_csv_dataframe(self, *, merge_cmap: bool = True) -> pd.DataFrame:
         """Load the user-selected CSV into a DataFrame.
 
-        Also re-applies the CMAP folder merge (if configured) so that users
-        who load a CSV exported before CMAP/MUNIX support existed still pick
-        up those fields without having to re-parse the MEM folder.
+        When *merge_cmap* is True (the default) and a CMAP folder is
+        configured, the CMAP merge is re-applied so users who load a CSV
+        exported before CMAP/MUNIX support existed still pick up those fields
+        without re-parsing the MEM folder. Pass ``merge_cmap=False`` for the
+        fast "use the archive as-is" path, which touches no folders at all.
         """
         df = load_existing_csv(self._csv_path)
-        if self._cmap_paths:
+        if merge_cmap and self._cmap_paths:
             df = _apply_cmap_merge(
                 df, self._cmap_paths, recursive=self._cmap_recursive,
             )
@@ -352,6 +376,327 @@ class AppController:
             return path
         return str(p.with_stem(p.stem + suffix))
 
+    # ── Excluded tests (from averages & export) ───────────
+
+    # Tests that can be excluded per participant. Waveform measures come from
+    # the visualization config; CSP and RMT are appended explicitly.
+    EXCLUDABLE_TEST_KEYS: list[str] = list(WAVEFORM_MEASURE_CONFIGS.keys()) + ["csp", "rmt"]
+
+    @staticmethod
+    def _coerce_id_list(value) -> set[int]:
+        """Coerce a stored/loose list of IDs into a set of ints."""
+        out: set[int] = set()
+        if isinstance(value, (list, tuple, set)):
+            for v in value:
+                try:
+                    out.add(int(v))
+                except (ValueError, TypeError):
+                    continue
+        return out
+
+    @classmethod
+    def _coerce_excluded_map(cls, value) -> dict[int, set[str]]:
+        """Coerce a stored {id: [test_key, ...]} mapping into {int: {str}}."""
+        out: dict[int, set[str]] = {}
+        if isinstance(value, dict):
+            valid = set(cls.EXCLUDABLE_TEST_KEYS)
+            for k, v in value.items():
+                try:
+                    pid = int(k)
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(v, (list, tuple, set)):
+                    tests = {str(t) for t in v if str(t) in valid}
+                    if tests:
+                        out[pid] = tests
+        return out
+
+    @classmethod
+    def _test_label(cls, test_key: str) -> str:
+        """Human-readable label for a test key (e.g. 't_sicf' -> 'T-SICF')."""
+        if test_key in WAVEFORM_MEASURE_CONFIGS:
+            return WAVEFORM_MEASURE_CONFIGS[test_key].get("label", test_key.upper())
+        if test_key == "csp":
+            return CSP_MEASURE_LABEL
+        if test_key == "rmt":
+            return "RMT"
+        return str(test_key).upper()
+
+    @staticmethod
+    def _test_columns(test_key: str) -> list[str]:
+        """DataFrame columns that hold the values for a given test."""
+        if test_key in WAVEFORM_MEASURE_CONFIGS:
+            cfg = WAVEFORM_MEASURE_CONFIGS[test_key]
+            cols = [f"{cfg['prefix']}_{isi}" for isi in cfg.get("isis", [])]
+            avg = cfg.get("avg_column")
+            if avg:
+                cols.append(avg)
+            return cols
+        if test_key == "csp":
+            return list(CSP_PROFILE_COLUMNS)
+        if test_key == "rmt":
+            return list(RMT_COLUMNS)
+        return []
+
+    @classmethod
+    def _test_keys_present(cls, rows: pd.DataFrame) -> list[str]:
+        """Return the excludable test keys that have any data in *rows*."""
+        present: list[str] = []
+        for key in cls.EXCLUDABLE_TEST_KEYS:
+            cols = cls._test_columns(key)
+            if any(c in rows.columns and rows[c].notna().any() for c in cols):
+                present.append(key)
+        return present
+
+    # ── Exclusion state (in-session) ──────────────────────
+
+    def is_test_excluded(self, pid, test_key: str) -> bool:
+        """True if *test_key* is excluded for participant *pid*."""
+        try:
+            pid_int = int(pid)
+        except (ValueError, TypeError):
+            return False
+        return test_key in self._excluded_tests.get(pid_int, set())
+
+    def set_test_excluded(self, pid, test_key: str, excluded: bool) -> None:
+        """Add or remove one (participant, test) exclusion for this session."""
+        try:
+            pid_int = int(pid)
+        except (ValueError, TypeError):
+            return
+        if test_key not in self.EXCLUDABLE_TEST_KEYS:
+            return
+        if excluded:
+            self._excluded_tests.setdefault(pid_int, set()).add(test_key)
+        elif pid_int in self._excluded_tests:
+            self._excluded_tests[pid_int].discard(test_key)
+            if not self._excluded_tests[pid_int]:
+                del self._excluded_tests[pid_int]
+
+    def is_participant_excluded(self, pid) -> bool:
+        """True if the participant has *any* excluded test (for warnings)."""
+        try:
+            pid_int = int(pid)
+        except (ValueError, TypeError):
+            return False
+        return bool(self._excluded_tests.get(pid_int))
+
+    def get_excluded_test_count(self, pid) -> int:
+        """Number of excluded tests for one participant."""
+        try:
+            pid_int = int(pid)
+        except (ValueError, TypeError):
+            return 0
+        return len(self._excluded_tests.get(pid_int, set()))
+
+    def get_excluded_test_labels(self, pid) -> list[str]:
+        """Ordered labels of the excluded tests for one participant."""
+        try:
+            pid_int = int(pid)
+        except (ValueError, TypeError):
+            return []
+        tests = self._excluded_tests.get(pid_int, set())
+        return [self._test_label(k) for k in self.EXCLUDABLE_TEST_KEYS if k in tests]
+
+    def get_excluded_entries(self) -> list[dict]:
+        """Flat, ordered list of every exclusion for the bottom-of-page list.
+
+        Each dict has: ``id``, ``test_key``, ``test_label``.
+        """
+        entries: list[dict] = []
+        for pid in sorted(self._excluded_tests):
+            for key in self.EXCLUDABLE_TEST_KEYS:
+                if key in self._excluded_tests[pid]:
+                    entries.append({
+                        "id": pid,
+                        "test_key": key,
+                        "test_label": self._test_label(key),
+                    })
+        return entries
+
+    def clear_excluded_tests(self) -> None:
+        """Drop every exclusion from the in-session map (does not persist)."""
+        self._excluded_tests.clear()
+
+    def save_excluded_tests(self) -> None:
+        """Persist the current exclusion map to saved defaults."""
+        payload = {
+            str(pid): sorted(tests)
+            for pid, tests in self._excluded_tests.items() if tests
+        }
+        save_defaults(**{KEY_EXCLUDED_MEASUREMENTS: payload})
+
+    def get_saved_excluded_map(self) -> dict[int, list[str]]:
+        """Return the exclusion map currently persisted on disk."""
+        saved = load_defaults()
+        coerced = self._coerce_excluded_map(saved.get(KEY_EXCLUDED_MEASUREMENTS, {}))
+        return {
+            pid: sorted(tests) for pid, tests in sorted(coerced.items())
+        }
+
+    # ── Applying exclusions ───────────────────────────────
+
+    def _measure_excluded_df(
+        self, df: pd.DataFrame | None, *, exempt_id=None,
+    ) -> pd.DataFrame | None:
+        """Return a copy of *df* with excluded test columns blanked (NaN).
+
+        For each (participant, test) exclusion, the test's value columns are
+        set to NaN in that participant's rows. This removes the participant
+        from that one measure's cohort average (the plotting layer drops rows
+        whose measure value is NaN) and blanks the measure in the exported CSV
+        — while leaving their other tests intact.
+
+        *exempt_id* skips one participant entirely — used when plotting so the
+        selected participant's own traces still render (they are already
+        dropped from cohort means by the plotting layer).
+        """
+        if df is None or not self._excluded_tests or "ID" not in df.columns:
+            return df
+        exempt = None
+        if exempt_id is not None:
+            try:
+                exempt = int(exempt_id)
+            except (ValueError, TypeError):
+                exempt = None
+
+        work = None
+        ids = None
+        for pid, tests in self._excluded_tests.items():
+            if pid == exempt or not tests:
+                continue
+            cols = []
+            for test_key in tests:
+                cols.extend(self._test_columns(test_key))
+            cols = [c for c in dict.fromkeys(cols) if c in df.columns]
+            if not cols:
+                continue
+            if work is None:
+                work = df.copy()
+                ids = pd.to_numeric(work["ID"], errors="coerce")
+            mask = ids == pid
+            if mask.any():
+                work.loc[mask, cols] = np.nan
+        return work if work is not None else df
+
+    def get_export_dataframe(self) -> pd.DataFrame | None:
+        """Return the working DataFrame with excluded tests blanked.
+
+        Used for CSV/dataframe export so excluded measurements are blank in the
+        exported file. The in-memory DataFrame is left untouched.
+        """
+        if self._dataframe is None:
+            return None
+        return self._measure_excluded_df(self._dataframe)
+
+    # ── Participant / test queries (for the exclusion page) ──
+
+    def get_participant_overviews(self) -> list[dict]:
+        """Return one summary row per participant for the exclusion page.
+
+        Each dict has: ``id``, ``study``, ``subject_type``, ``visit_count``,
+        ``excluded_count`` (number of excluded tests).
+        """
+        df = self._dataframe
+        if df is None or "ID" not in df.columns:
+            return []
+        ids = pd.to_numeric(df["ID"], errors="coerce")
+        overviews: list[dict] = []
+        for pid in sorted(int(i) for i in ids.dropna().unique()):
+            rows = df[ids == pid]
+            overviews.append({
+                "id": pid,
+                "study": self._first_str(rows, "Study"),
+                "subject_type": self._first_str(rows, "Subject_type"),
+                "visit_count": (
+                    int(rows["Date"].dropna().nunique())
+                    if "Date" in rows.columns else 0
+                ),
+                "excluded_count": self.get_excluded_test_count(pid),
+            })
+        return overviews
+
+    def get_participant_tests(self, pid) -> list[dict]:
+        """Return the excludable tests a participant has data for.
+
+        Each dict has: ``key``, ``label``, ``excluded``.
+        """
+        df = self._dataframe
+        if df is None or "ID" not in df.columns:
+            return []
+        try:
+            pid_int = int(pid)
+        except (ValueError, TypeError):
+            return []
+        ids = pd.to_numeric(df["ID"], errors="coerce")
+        rows = df[ids == pid_int]
+        if rows.empty:
+            return []
+        excluded = self._excluded_tests.get(pid_int, set())
+        return [
+            {"key": k, "label": self._test_label(k), "excluded": k in excluded}
+            for k in self._test_keys_present(rows)
+        ]
+
+    def get_participant_measurements(self, pid) -> list[dict]:
+        """Return read-only per-visit reference rows for one participant.
+
+        Each dict has: ``date``, ``cortex``, ``subject_type``, ``tests`` (a
+        list of measure labels that have data). Used to show the user what
+        data a participant contributes.
+        """
+        df = self._dataframe
+        if df is None or "ID" not in df.columns:
+            return []
+        try:
+            pid_int = int(pid)
+        except (ValueError, TypeError):
+            return []
+        ids = pd.to_numeric(df["ID"], errors="coerce")
+        rows = df[ids == pid_int]
+        if rows.empty:
+            return []
+
+        measurements: list[dict] = []
+        group_cols = [
+            c for c in ("Date", "Stimulated_cortex") if c in rows.columns
+        ]
+        if group_cols:
+            for key, group in rows.groupby(group_cols, dropna=False):
+                key_vals = key if isinstance(key, tuple) else (key,)
+                info = dict(zip(group_cols, key_vals))
+                measurements.append({
+                    "date": str(info.get("Date", "") or "").strip(),
+                    "cortex": str(info.get("Stimulated_cortex", "") or "").strip(),
+                    "subject_type": self._first_str(group, "Subject_type"),
+                    "tests": [self._test_label(k) for k in self._test_keys_present(group)],
+                })
+        else:
+            measurements.append({
+                "date": "", "cortex": "",
+                "subject_type": self._first_str(rows, "Subject_type"),
+                "tests": [self._test_label(k) for k in self._test_keys_present(rows)],
+            })
+        measurements.sort(key=lambda m: self._sort_key_date(m["date"]))
+        return measurements
+
+    @staticmethod
+    def _first_str(rows: pd.DataFrame, column: str) -> str:
+        """First non-null value of *column* as a stripped string ('' if none)."""
+        if column not in rows.columns:
+            return ""
+        non_null = rows[column].dropna()
+        if non_null.empty:
+            return ""
+        return str(non_null.iloc[0]).strip()
+
+    def _sort_key_date(self, raw: str):
+        """Sort key that orders parseable dates chronologically, blanks last."""
+        try:
+            return (0, datetime.strptime(raw, self._DATE_FMT))
+        except (ValueError, TypeError):
+            return (1, raw)
+
     # ── Cortex selection ──────────────────────────────────
 
     def get_cortex_options(
@@ -387,12 +732,15 @@ class AppController:
     def get_selected_cortex(self) -> str | list[str] | None:
         return getattr(self, "_selected_cortex", None)
 
-    def _get_cortex_filtered_df(self, cortex_value: str | None = None) -> pd.DataFrame:
-        """Return the main DataFrame filtered to a specific cortex value.
+    def _get_cortex_filtered_df(
+        self, cortex_value: str | None = None, df: pd.DataFrame | None = None,
+    ) -> pd.DataFrame:
+        """Return *df* (or the main DataFrame) filtered to a cortex value.
 
-        If *cortex_value* is None, returns the unfiltered DataFrame.
+        If *cortex_value* is None, returns the frame unfiltered.
         """
-        df = self._dataframe
+        if df is None:
+            df = self._dataframe
         if df is None:
             raise ValueError("No DataFrame available.")
         if cortex_value is None or "Stimulated_cortex" not in df.columns:
@@ -720,6 +1068,13 @@ class AppController:
         norm_type = str(graph_type).strip().lower().replace("-", "_").replace(" ", "_")
         title = self._build_graph_title(graph_type, measure)
 
+        # Blank excluded tests in the cohort data before plotting so those
+        # measurements don't contribute to group averages. The selected
+        # participant is exempted so their own traces still render even if some
+        # of their tests are excluded (the plotting layer already removes the
+        # highlight from the group means).
+        base_df = self._measure_excluded_df(self._dataframe, exempt_id=pid)
+
         kwargs: dict = dict(
             participant_id=pid,
             mem_date=date.strftime(self._DATE_FMT),
@@ -734,20 +1089,20 @@ class AppController:
             # "Both" mode
             if norm_type in self._GRAPH_TYPE_NEEDS_CORTEX_OVERLAY:
                 # Pass unfiltered data + group_by_cortex flag
-                kwargs["data_df"] = self._dataframe
+                kwargs["data_df"] = base_df
                 kwargs["group_by_cortex"] = True
             elif norm_type in self._GRAPH_TYPE_IS_GROUPED:
                 # Pass unfiltered data + highlight_cortex_values
-                kwargs["data_df"] = self._dataframe
+                kwargs["data_df"] = base_df
                 kwargs["highlight_cortex_values"] = cortex
             else:
                 # visit_timeline, visit_table, rmt_over_time — no cortex-specific handling
-                kwargs["data_df"] = self._dataframe
+                kwargs["data_df"] = base_df
         elif isinstance(cortex, str):
             # Single cortex — filter data
-            kwargs["data_df"] = self._get_cortex_filtered_df(cortex)
+            kwargs["data_df"] = self._get_cortex_filtered_df(cortex, df=base_df)
         else:
-            kwargs["data_df"] = self._dataframe
+            kwargs["data_df"] = base_df
 
         if measure is not None:
             return plot_mem_graph(graph_type=graph_type, measure=measure, **kwargs)
@@ -1070,7 +1425,7 @@ class AppController:
 
     # Page-index mapping (must match _page_order in app.py)
     PAGE_NAMES = [
-        "welcome", "file_panel", "data_mode", "participant",
+        "welcome", "file_panel", "data_mode", "exclusion", "participant",
         "visualization", "export", "email", "redcap", "sync", "finish",
     ]
 
@@ -1099,20 +1454,22 @@ class AppController:
                     )
             elif idx == 2:  # data_mode — needs CSV from phase 1
                 pass  # covered by file_panel check
-            elif idx == 3:  # participant — auto-selects most recent
+            elif idx == 3:  # exclusion — optional, no defaults required
+                pass  # saved exclusions auto-apply at startup
+            elif idx == 4:  # participant — auto-selects most recent
                 pass  # no user default needed
-            elif idx == 4:  # visualization — auto-generates all
+            elif idx == 5:  # visualization — auto-generates all
                 pass  # no user default needed
-            elif idx == 5:  # export
+            elif idx == 6:  # export
                 csv_out = saved.get(KEY_EXPORT_CSV, "")
                 pdf_out = saved.get(KEY_EXPORT_PDF, "")
                 if not csv_out and not pdf_out:
                     missing.append(
                         "Export: No default CSV or PDF export path."
                     )
-            elif idx == 6:  # email — opt-in, never required
+            elif idx == 7:  # email — opt-in, never required
                 pass
-            elif idx == 7:  # redcap
+            elif idx == 8:  # redcap
                 for key, label in [
                     (KEY_REDCAP_DATA_DIR, "REDCap Data Directory"),
                     (KEY_REDCAP_DICT_DIR, "REDCap Dictionary Directory"),
@@ -1122,7 +1479,7 @@ class AppController:
                     if not saved.get(key, ""):
                         missing.append(f"REDCap Export: No default {label}.")
                         break  # one message is enough
-            elif idx == 8:  # sync — best-effort, no hard requirement
+            elif idx == 9:  # sync — best-effort, no hard requirement
                 pass
 
         return missing
@@ -1210,8 +1567,14 @@ class AppController:
             if df is None or df.empty:
                 raise ValueError("Loaded CSV contains no data.")
 
-        # Phase 3 — participant: auto-select most recent
+        # Phase 3 — exclusion: saved exclusions are applied at controller
+        # startup, so an automated run has nothing to do here. The active set
+        # is already reflected in the report figures and the export DataFrame.
         if from_index <= 3 < to_index:
+            pass
+
+        # Phase 4 — participant: auto-select most recent
+        if from_index <= 4 < to_index:
             _status("Selecting most recent participant...")
             pid, date = self.get_most_recent_visit()
             if pid is None or date is None:
@@ -1240,8 +1603,8 @@ class AppController:
                 if not rows.empty:
                     summary["study"] = str(rows["Study"].iloc[0])
 
-        # Phase 4 — visualization: generate all figures
-        if from_index <= 4 < to_index:
+        # Phase 5 — visualization: generate all figures
+        if from_index <= 5 < to_index:
             from gui.visualization_panel import GRAPH_REGISTRY
             from matplotlib.figure import Figure
             from reports.captions import caption_for
@@ -1316,8 +1679,8 @@ class AppController:
             ]
             summary["figure_count"] = len(all_items)
 
-        # Phase 5 — export: CSV + PDF
-        if from_index <= 5 < to_index:
+        # Phase 6 — export: CSV + PDF
+        if from_index <= 6 < to_index:
             export_paths = self.get_default_export_paths()
             csv_path = self.stamp_export_path(export_paths.get("csv", ""))
             pdf_path = self.stamp_export_path(export_paths.get("pdf", ""))
@@ -1326,7 +1689,7 @@ class AppController:
                 _status("Exporting CSV...")
                 out = Path(csv_path)
                 out.parent.mkdir(parents=True, exist_ok=True)
-                self.get_dataframe().to_csv(out, index=False)
+                self.get_export_dataframe().to_csv(out, index=False)
 
             if pdf_path:
                 _status("Exporting PDF...")
@@ -1338,8 +1701,8 @@ class AppController:
             summary["csv_export"] = csv_path
             summary["pdf_export"] = pdf_path
 
-        # Phase 6 — email (opt-in, auto-send only with full saved defaults)
-        if from_index <= 6 < to_index:
+        # Phase 7 — email (opt-in, auto-send only with full saved defaults)
+        if from_index <= 7 < to_index:
             email_defaults = self.get_email_defaults()
             to_list = [a.strip() for a in email_defaults["to"].split(",") if a.strip()]
             cc_list = [a.strip() for a in email_defaults["cc"].split(",") if a.strip()]
@@ -1378,8 +1741,8 @@ class AppController:
                 summary["email_sent"] = False
                 summary["email_error"] = "Skipped (no saved email defaults)."
 
-        # Phase 7 — redcap
-        if from_index <= 7 < to_index:
+        # Phase 8 — redcap
+        if from_index <= 8 < to_index:
             rc_data = saved.get(KEY_REDCAP_DATA_DIR, "")
             rc_dict = saved.get(KEY_REDCAP_DICT_DIR, "")
             rc_tpl = saved.get(KEY_REDCAP_TEMPLATE_DIR, "")
@@ -1396,8 +1759,8 @@ class AppController:
                 except Exception:
                     pass  # best-effort
 
-        # Phase 8 — sync
-        if from_index <= 8 < to_index:
+        # Phase 9 — sync
+        if from_index <= 9 < to_index:
             sync_pairs_data = self.get_sync_defaults()
             if sync_pairs_data:
                 _status("Syncing files...")

@@ -41,8 +41,6 @@ a = Analysis(
     datas=[
         # CustomTkinter theme/assets
         (ctk_path, 'customtkinter/'),
-        # User-settings template
-        (str(_PROJECT_ROOT / 'core' / 'saved_defaults.json'), 'core/'),
         # Institutional letterhead PNGs used on the report cover page
         (str(_PROJECT_ROOT / 'icons'), 'icons'),
     ],

@@ -344,6 +344,12 @@ class ParticipantPanel(ctk.CTkFrame):
             )
             return
 
+        # Warn if this participant is on the exclusion list — their data is
+        # held out of the cohort averages and the exported CSV.
+        if self._controller.is_participant_excluded(pid):
+            if not self._confirm_excluded(pid):
+                return
+
         self._controller.set_selected_participant(pid, selected_date)
 
         # Store cortex options — visualization panel handles the selection UI
@@ -353,6 +359,65 @@ class ParticipantPanel(ctk.CTkFrame):
         else:
             self._controller.set_selected_cortex(cortex_options[0] if cortex_options else None)
         self._on_next()
+
+    def _confirm_excluded(self, pid: int) -> bool:
+        """Warn that *pid* is excluded; return True if the user proceeds."""
+        popup = ctk.CTkToplevel(self)
+        popup.title("Participant excluded")
+        popup.geometry("480x250")
+        popup.resizable(False, False)
+        popup.grab_set()
+        popup.after(100, popup.focus_force)
+
+        popup.grid_columnconfigure(0, weight=1)
+        popup.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(
+            popup, text="Participant has excluded tests", font=FONT_HEADING,
+            text_color=ERROR_COLOR, anchor="w",
+        ).grid(row=0, column=0, sticky="w", padx=PAD_X, pady=(PAD_Y, 4))
+
+        excluded_tests = self._controller.get_excluded_test_labels(pid)
+        tests_str = ", ".join(excluded_tests) if excluded_tests else "some tests"
+        ctk.CTkLabel(
+            popup,
+            text=(
+                f"Participant {pid} has excluded test(s): {tests_str}. "
+                "Those measurements are left out of the cohort averages and "
+                "blanked in the exported CSV.\n\n"
+                "You can still create this participant's report, but the cohort "
+                "benchmark lines for those tests will not include their data. Continue?"
+            ),
+            font=FONT_SMALL, anchor="nw", justify="left", wraplength=430,
+        ).grid(row=1, column=0, sticky="nsew", padx=PAD_X, pady=(0, PAD_Y))
+
+        result = {"ok": False}
+
+        btn_row = ctk.CTkFrame(popup, fg_color="transparent")
+        btn_row.grid(row=2, column=0, sticky="ew", padx=PAD_X, pady=(0, PAD_Y))
+        btn_row.grid_columnconfigure(0, weight=1)
+
+        def _continue():
+            result["ok"] = True
+            popup.destroy()
+
+        ctk.CTkButton(
+            btn_row, text="Cancel", width=110, height=BUTTON_HEIGHT,
+            corner_radius=CORNER_RADIUS, font=FONT_BUTTON,
+            fg_color="transparent", hover_color=ACCENT_COLOR,
+            border_width=1, border_color=ACCENT_COLOR, text_color=ACCENT_COLOR,
+            command=popup.destroy,
+        ).grid(row=0, column=0, sticky="w")
+
+        ctk.CTkButton(
+            btn_row, text="Continue anyway", width=150, height=BUTTON_HEIGHT,
+            corner_radius=CORNER_RADIUS, font=FONT_BUTTON,
+            fg_color=ACCENT_COLOR, hover_color=ACCENT_HOVER,
+            command=_continue,
+        ).grid(row=0, column=1, sticky="e")
+
+        self.wait_window(popup)
+        return result["ok"]
 
     # ── Search / dropdown helpers ─────────────────────────
 

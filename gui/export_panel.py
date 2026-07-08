@@ -259,7 +259,7 @@ class ExportPanel(ctk.CTkFrame):
         results: list[str] = []
         try:
             if csv_path:
-                df = self._controller.get_dataframe()
+                df = self._controller.get_export_dataframe()
                 if df is None:
                     raise ValueError("No DataFrame available.")
                 csv_path = self._controller.stamp_export_path(csv_path)

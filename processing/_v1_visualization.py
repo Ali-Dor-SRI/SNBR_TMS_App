@@ -1218,6 +1218,41 @@ def prepare_group_rows(
     return patient_rows.reset_index(drop=True), control_rows.reset_index(drop=True), excluded_source_files
 
 
+def draw_group_sd_lines(axis, specs, darken=0.5):
+    """Overlay mean ± 1 SD whiskers on cohort violins.
+
+    *specs* is an iterable of ``(x_position, mean, std, color)`` tuples — one
+    per group. Each whisker is drawn in a darkened shade of the group's colour
+    (scaled toward black by *darken*) at full opacity so it reads clearly
+    against the pale violin body. Whiskers with a non-finite or non-positive SD
+    are skipped (e.g. a cohort of one, whose sample SD is undefined). Returns
+    the list of y-extents drawn so the caller can widen the axis limits to fit
+    the caps.
+    """
+    from matplotlib.colors import to_rgb
+
+    extents = []
+    for x_pos, mean_value, std_value, color in specs:
+        if not np.isfinite(mean_value) or not np.isfinite(std_value) or std_value <= 0:
+            continue
+        r, g, b = to_rgb(color)
+        dark_color = (r * darken, g * darken, b * darken)
+        axis.errorbar(
+            x_pos,
+            mean_value,
+            yerr=std_value,
+            fmt="none",
+            ecolor=dark_color,
+            elinewidth=1.8,
+            capsize=7,
+            capthick=1.8,
+            alpha=1.0,
+            zorder=4.5,
+        )
+        extents.extend([mean_value - std_value, mean_value + std_value])
+    return extents
+
+
 def jittered_x_positions(center_x: float, count: int, jitter_width: float = 0.18, seed: int = 0) -> np.ndarray:
     """Return deterministic jittered x positions for a categorical point plot."""
     if count <= 0:
@@ -1554,7 +1589,21 @@ def plot_tsici_group_comparison(
         zorder=5,
     )
 
-    y_values = _cortex_highlight_values + patient_rows[value_column].tolist() + control_rows[value_column].tolist()
+    # Mean ± 1 SD whiskers on each cohort violin.
+    sd_extents = draw_group_sd_lines(
+        axis,
+        [
+            (POINTPLOT_CATEGORY_X["patient"], patient_mean, patient_std, patient_edge),
+            (POINTPLOT_CATEGORY_X["control"], control_mean, control_std, control_edge),
+        ],
+    )
+
+    y_values = (
+        _cortex_highlight_values
+        + patient_rows[value_column].tolist()
+        + control_rows[value_column].tolist()
+        + sd_extents
+    )
     y_min = min(y_values)
     y_max = max(y_values)
 
@@ -3657,7 +3706,21 @@ def draw_scalar_group_axis(
     if highlight_cortex_values and len(highlight_cortex_values) > 1:
         axis.legend(frameon=False, loc="upper right", fontsize=9, title="Cortex", labelspacing=1.4)
 
-    y_values = _cortex_highlight_values + patient_rows[value_column].tolist() + control_rows[value_column].tolist()
+    # Mean ± 1 SD whiskers on each cohort violin.
+    sd_extents = draw_group_sd_lines(
+        axis,
+        [
+            (POINTPLOT_CATEGORY_X["patient"], patient_mean, patient_std, patient_edge),
+            (POINTPLOT_CATEGORY_X["control"], control_mean, control_std, control_edge),
+        ],
+    )
+
+    y_values = (
+        _cortex_highlight_values
+        + patient_rows[value_column].tolist()
+        + control_rows[value_column].tolist()
+        + sd_extents
+    )
     y_min = min(y_values)
     y_max = max(y_values)
     y_pad = max(6.0, (y_max - y_min) * 0.18 if y_max > y_min else 8.0)

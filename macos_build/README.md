@@ -226,7 +226,12 @@ Tk wasn't available in the Python you built with. Reinstall Python with Tk (see 
 The spec sets `NSHighResolutionCapable: True`. If you custom-edit the spec, keep that key.
 
 **`saved_defaults.json` doesn't persist across app launches.**
-The settings file currently lives next to `core/user_settings.py`. Inside a `.app` that lands in `Contents/Resources/core/`, which is writable by the running app on macOS for user-owned bundles — but **not** if the user drags the `.app` into `/Applications` and the app runs as a non-admin. If users report defaults vanishing, the fix is to change `core/user_settings.py` so `_SETTINGS_FILE` resolves to `~/Library/Application Support/SNBR_TMS_App/saved_defaults.json` on Darwin. Worth checking on the target Mac before declaring the build good.
+This is handled. `core/user_settings.py` detects a frozen build and writes
+settings to a per-user, writable location instead of inside the bundle —
+on macOS that is `~/Library/Application Support/SNBR_TMS_App/saved_defaults.json`
+(Windows uses `%APPDATA%\SNBR_TMS_App\`). The personal `saved_defaults.json`
+is no longer bundled into the app, so each user starts with empty defaults and
+their saved paths/exclusions persist across launches.
 
 **Bundle is huge (600 MB+).**
 Expected. matplotlib alone pulls in ~200 MB of fonts and backends. If you need to trim, the biggest wins come from stripping unused matplotlib backends (already excluded in the spec) and removing `pytest`/`IPython`/`notebook` (already excluded).

@@ -14,6 +14,9 @@ from gui.theme import (
 # Radio-button values
 MODE_EXISTING_CSV = 1
 MODE_PARSE_MEM = 2
+# Fast path: load the chosen archive CSV as-is — no MEM-folder scan, no CMAP
+# merge. Requires a CSV to have been selected on the Import Settings page.
+MODE_EXISTING_CSV_FAST = 3
 
 
 class DataModePanel(ctk.CTkFrame):
@@ -55,26 +58,47 @@ class DataModePanel(ctk.CTkFrame):
         options.grid(row=2, column=0, sticky="nsew", padx=PAD_X)
         options.grid_columnconfigure(0, weight=1)
 
-        # Option 1 — existing CSV
+        # Option 1 — fast: use the chosen archive CSV as-is
+        self._radio_fast = ctk.CTkRadioButton(
+            options,
+            text="Create reports based on previous data frame (archive .csv)",
+            variable=self._mode_var,
+            value=MODE_EXISTING_CSV_FAST,
+            font=FONT_HEADING,
+        )
+        self._radio_fast.grid(row=0, column=0, sticky="w", pady=(0, 2))
+
+        self._fast_desc = ctk.CTkLabel(
+            options,
+            text="Use the selected archive .csv as-is. No parsing, no folder scan — fastest path to graphs.",
+            font=FONT_SUBTITLE,
+            text_color=SUBTITLE_COLOR,
+            anchor="w",
+            justify="left",
+        )
+        self._fast_desc.grid(row=1, column=0, sticky="w", padx=(26, 0), pady=(0, SECTION_PAD_Y))
+
+        # Option 2 — existing CSV, also checking for newly added MEM files
         self._radio_csv = ctk.CTkRadioButton(
             options,
-            text="Create report from existing data frame",
+            text="Create report from existing data frame (check for new MEM files)",
             variable=self._mode_var,
             value=MODE_EXISTING_CSV,
             font=FONT_HEADING,
         )
-        self._radio_csv.grid(row=0, column=0, sticky="w", pady=(0, 2))
+        self._radio_csv.grid(row=2, column=0, sticky="w", pady=(0, 2))
 
         self._csv_desc = ctk.CTkLabel(
             options,
-            text="Load the CSV archive selected on the previous page. No new parsing.",
+            text="Load the archive .csv, then scan the MEM folder for newly added .MEM files (no parsing).",
             font=FONT_SUBTITLE,
             text_color=SUBTITLE_COLOR,
             anchor="w",
+            justify="left",
         )
-        self._csv_desc.grid(row=1, column=0, sticky="w", padx=(26, 0), pady=(0, SECTION_PAD_Y))
+        self._csv_desc.grid(row=3, column=0, sticky="w", padx=(26, 0), pady=(0, SECTION_PAD_Y))
 
-        # Option 2 — parse MEM
+        # Option 3 — parse MEM
         self._radio_mem = ctk.CTkRadioButton(
             options,
             text="Parse .MEM files and create new data frame",
@@ -82,7 +106,7 @@ class DataModePanel(ctk.CTkFrame):
             value=MODE_PARSE_MEM,
             font=FONT_HEADING,
         )
-        self._radio_mem.grid(row=2, column=0, sticky="w", pady=(0, 2))
+        self._radio_mem.grid(row=4, column=0, sticky="w", pady=(0, 2))
 
         ctk.CTkLabel(
             options,
@@ -90,7 +114,7 @@ class DataModePanel(ctk.CTkFrame):
             font=FONT_SUBTITLE,
             text_color=SUBTITLE_COLOR,
             anchor="w",
-        ).grid(row=3, column=0, sticky="w", padx=(26, 0), pady=(0, 2))
+        ).grid(row=5, column=0, sticky="w", padx=(26, 0), pady=(0, 2))
 
         ctk.CTkLabel(
             options,
@@ -98,7 +122,7 @@ class DataModePanel(ctk.CTkFrame):
             font=FONT_BUTTON,
             text_color=SUBTITLE_COLOR,
             anchor="w",
-        ).grid(row=4, column=0, sticky="w", padx=(26, 0), pady=(0, SECTION_PAD_Y))
+        ).grid(row=6, column=0, sticky="w", padx=(26, 0), pady=(0, SECTION_PAD_Y))
 
         # Progress bar (hidden until import starts)
         self._progress = ctk.CTkProgressBar(
@@ -150,12 +174,27 @@ class DataModePanel(ctk.CTkFrame):
         has_csv = bool(csv_path)
 
         if has_csv:
+            self._radio_fast.configure(state="normal")
+            self._fast_desc.configure(
+                text=(
+                    "Use the selected archive .csv as-is. No parsing, no folder "
+                    f"scan — fastest path to graphs.\n({csv_path})"
+                ),
+            )
             self._radio_csv.configure(state="normal")
             self._csv_desc.configure(
-                text=f"Load the selected CSV archive. No new parsing.\n({csv_path})",
+                text=(
+                    "Load the archive .csv, then scan the MEM folder for newly "
+                    f"added .MEM files (no parsing).\n({csv_path})"
+                ),
             )
-            self._mode_var.set(MODE_EXISTING_CSV)
+            # Default to the fast path when an archive is available.
+            self._mode_var.set(MODE_EXISTING_CSV_FAST)
         else:
+            self._radio_fast.configure(state="disabled")
+            self._fast_desc.configure(
+                text="No CSV archive was selected on the previous page.",
+            )
             self._radio_csv.configure(state="disabled")
             self._csv_desc.configure(
                 text="No CSV archive was selected on the previous page.",
@@ -192,7 +231,11 @@ class DataModePanel(ctk.CTkFrame):
     def _run_import(self, mode: int):
         """Execute the chosen import in a background thread."""
         try:
-            if mode == MODE_EXISTING_CSV:
+            if mode == MODE_EXISTING_CSV_FAST:
+                # Fast path: load the archive as-is, no folder access at all.
+                df = self._controller.load_csv_dataframe(merge_cmap=False)
+                self.after(0, self._on_fast_success, df)
+            elif mode == MODE_EXISTING_CSV:
                 df = self._controller.load_csv_dataframe()
                 new_count = self._controller.count_new_mem_files(df)
                 self.after(0, self._on_import_success, df, new_count)
@@ -204,6 +247,13 @@ class DataModePanel(ctk.CTkFrame):
         except Exception:
             msg = traceback.format_exc()
             self.after(0, self._on_import_error, msg)
+
+    def _on_fast_success(self, df):
+        """Callback after the fast archive load — advance immediately."""
+        self._set_busy(False)
+        self._status_var.set(f"Loaded {len(df)} rows from archive CSV.")
+        self._status_label.configure(text_color=SUCCESS_COLOR)
+        self._on_next()
 
     def _on_import_success(self, df, new_count: int):
         """Callback on the main thread after CSV load completes."""

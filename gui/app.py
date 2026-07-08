@@ -6,6 +6,7 @@ import customtkinter as ctk
 
 from gui.controller import AppController
 from gui.data_mode_panel import DataModePanel
+from gui.exclusion_panel import ExclusionPanel
 from gui.email_panel import EmailPanel
 from gui.export_panel import ExportPanel
 from gui.file_panel import FilePanel
@@ -27,6 +28,7 @@ PAGE_LABELS = [
     ("welcome",       "Welcome"),
     ("file_panel",    "Import Settings"),
     ("data_mode",     "Data Mode"),
+    ("exclusion",     "Exclude Participants"),
     ("participant",   "Participant"),
     ("visualization", "Visualization"),
     ("export",        "Export"),
@@ -64,7 +66,7 @@ class TMSApp(ctk.CTk):
 
         # Ordered page names for keyboard navigation.
         self._page_order = [
-            "welcome", "file_panel", "data_mode", "participant",
+            "welcome", "file_panel", "data_mode", "exclusion", "participant",
             "visualization", "export", "email", "redcap", "sync", "finish",
         ]
 
@@ -182,23 +184,33 @@ class TMSApp(ctk.CTk):
         data_mode = DataModePanel(
             self._container,
             controller=self._controller,
-            on_next=lambda: self._show_page("participant"),
+            on_next=lambda: self._show_page("exclusion"),
             on_back=lambda: self._show_page("file_panel"),
         )
         data_mode.grid(row=0, column=0, sticky="nsew")
         self._pages["data_mode"] = data_mode
 
-        # Page 3 — participant / visit date selection
+        # Page 3 — exclude participants from averages
+        exclusion = ExclusionPanel(
+            self._container,
+            controller=self._controller,
+            on_next=lambda: self._show_page("participant"),
+            on_back=lambda: self._show_page("data_mode"),
+        )
+        exclusion.grid(row=0, column=0, sticky="nsew")
+        self._pages["exclusion"] = exclusion
+
+        # Page 4 — participant / visit date selection
         participant = ParticipantPanel(
             self._container,
             controller=self._controller,
             on_next=lambda: self._show_page("visualization"),
-            on_back=lambda: self._show_page("data_mode"),
+            on_back=lambda: self._show_page("exclusion"),
         )
         participant.grid(row=0, column=0, sticky="nsew")
         self._pages["participant"] = participant
 
-        # Page 4 — visualization selection & preview
+        # Page 5 — visualization selection & preview
         visualization = VisualizationPanel(
             self._container,
             controller=self._controller,
@@ -208,7 +220,7 @@ class TMSApp(ctk.CTk):
         visualization.grid(row=0, column=0, sticky="nsew")
         self._pages["visualization"] = visualization
 
-        # Page 5 — export
+        # Page 6 — export
         export = ExportPanel(
             self._container,
             controller=self._controller,
@@ -218,7 +230,7 @@ class TMSApp(ctk.CTk):
         export.grid(row=0, column=0, sticky="nsew")
         self._pages["export"] = export
 
-        # Page 6 — Email report
+        # Page 7 — Email report
         email = EmailPanel(
             self._container,
             controller=self._controller,
@@ -228,7 +240,7 @@ class TMSApp(ctk.CTk):
         email.grid(row=0, column=0, sticky="nsew")
         self._pages["email"] = email
 
-        # Page 7 — REDCap export
+        # Page 8 — REDCap export
         redcap = RedcapPanel(
             self._container,
             controller=self._controller,
@@ -238,7 +250,7 @@ class TMSApp(ctk.CTk):
         redcap.grid(row=0, column=0, sticky="nsew")
         self._pages["redcap"] = redcap
 
-        # Page 7 — backup & sync
+        # Page 9 — backup & sync
         sync = SyncPanel(
             self._container,
             controller=self._controller,
@@ -248,7 +260,7 @@ class TMSApp(ctk.CTk):
         sync.grid(row=0, column=0, sticky="nsew")
         self._pages["sync"] = sync
 
-        # Page 8 — finish (restart or close)
+        # Page 10 — finish (restart or close)
         finish = FinishPanel(
             self._container,
             controller=self._controller,
