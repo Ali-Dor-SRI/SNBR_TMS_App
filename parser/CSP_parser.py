@@ -19,6 +19,12 @@ from pathlib import Path
 from typing import Callable
 
 from parser.mem_parser import iter_files, normalize_dirs
+from parser.recording_target import (
+    MUSCLE_COLUMN,
+    SIDE_COLUMN,
+    extract_muscle,
+    extract_recorded_side,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -42,7 +48,8 @@ _CSP_VALUE_PATTERN = re.compile(r"^(CSPs|CSPe)-(\d+)\(ms\)\s*=\s*([-\d.]+)")
 def csp_output_columns() -> list[str]:
     """Return the stable output schema for parsed CSP records."""
     return (
-        ["Study", "ID", "Date", "Age", "Sex", "Subject_type", "Stimulated_cortex"]
+        ["Study", "ID", "Date", "Age", "Sex", "Subject_type", "Stimulated_cortex",
+         MUSCLE_COLUMN, SIDE_COLUMN]
         + list(CSP_VALUE_COLUMNS)
         + ["source_file"]
     )
@@ -62,6 +69,8 @@ def initialize_csp_record() -> dict:
         "Sex": None,
         "Subject_type": None,
         "Stimulated_cortex": None,
+        MUSCLE_COLUMN: None,
+        SIDE_COLUMN: None,
     }
     for col in CSP_VALUE_COLUMNS:
         record[col] = None
@@ -135,6 +144,7 @@ _HEADER_PARSERS: dict[str, tuple[str, Callable] | Callable] = {
     "Sex:": ("Sex", lambda s: _extract_match(r"Sex:\s+([MF])", s)),
     "Subject type:": ("Subject_type", _extract_subject_type),
     "Stim/record": ("Stimulated_cortex", _extract_stimulated_cortex),
+    "Muscle:": (MUSCLE_COLUMN, extract_muscle),
 }
 
 
@@ -152,6 +162,10 @@ def _parse_header_field(stripped: str, record: dict) -> None:
                 value = parser(stripped)
                 if value is not None:
                     record[key] = value
+                if prefix == "Stim/record":
+                    side = extract_recorded_side(stripped)
+                    if side is not None:
+                        record[SIDE_COLUMN] = side
             return
 
 

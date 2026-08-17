@@ -27,6 +27,12 @@ from parser.mem_parser import (
     TSICI_ISIS,
     TSICF_ISIS,
 )
+from parser.sr_parser import SR_CURVE_COLUMN
+from parser.strength_duration_parser import (
+    SD_POINTS_COLUMN,
+    SD_RHEOBASE_COLUMN,
+    SD_TAU_COLUMN,
+)
 
 # ---------------------------------------------------------------------------
 # REDCap ISI definitions  (superset of what the parser currently extracts)
@@ -177,6 +183,9 @@ _INTERNAL_ONLY_COLUMNS = (
     + [f"CSPe_{level}" for level in CSP_RMT_LEVELS]
     # Average columns (REDCap does not have these)
     + ["T_SICI_avg", "T_SICF_avg", "A_SICI_avg", "A_SICF_avg"]
+    # Strength-duration scalars + the persisted SR/SD plot data (JSON): kept in
+    # the internal DataFrame / CSV only, with no REDCap counterpart.
+    + [SD_RHEOBASE_COLUMN, SD_TAU_COLUMN, SR_CURVE_COLUMN, SD_POINTS_COLUMN]
     # Metadata columns that don't map directly to REDCap TMS fields
     + ["Study", "Subject_type", "source_file"]
 )

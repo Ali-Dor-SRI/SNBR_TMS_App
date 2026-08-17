@@ -38,6 +38,9 @@ GRAPH_REGISTRY: list[GraphEntry] = [
     GraphEntry("visit_table", "Visit Test Table", "Visit Summary", "visit_table", None),
     GraphEntry("cmap_table", "CMAP Table", "Visit Summary", "cmap_table", None),
     GraphEntry("munix_table", "MUNIX Table", "Visit Summary", "munix_table", None),
+    GraphEntry("stimulus_response", "Stimulus-Response", "Visit Summary", "stimulus_response", None),
+    GraphEntry("strength_duration_curve", "Strength-Duration Curve", "Visit Summary", "strength_duration_curve", None),
+    GraphEntry("charge_duration_weiss", "Charge-Duration (Weiss)", "Visit Summary", "charge_duration_weiss", None),
     # T-SICI cluster (everything about t-SICI together, in the report's section order)
     GraphEntry("profile__t_sici", "T-SICI Profile", "Waveform Profiles", "profile", "t_sici"),
     GraphEntry("grouped__t_sici", "T-SICI Grouped", "Cohort Comparisons", "grouped", "t_sici"),
@@ -45,6 +48,7 @@ GRAPH_REGISTRY: list[GraphEntry] = [
     GraphEntry("grouped_sex__t_sici", "T-SICI Sex-Matched", "Sex-Matched Comparisons", "grouped", "t_sici", match_by="sex"),
     GraphEntry("grouped_sex_age__t_sici", "T-SICI Sex & Age", "Sex & Age Matched", "grouped", "t_sici", match_by="sex,age"),
     GraphEntry("over_time__t_sici", "T-SICI Over Time", "Over Time", "over_time", "t_sici"),
+    GraphEntry("trajectory__t_sici", "T-SICI Trajectory", "Over Time", "trajectory", "t_sici"),
     GraphEntry("visit_profiles__t_sici", "T-SICI Visit Profiles", "Visit Profiles", "visit_profiles", "t_sici"),
     # RMT cluster
     GraphEntry("rmt_over_time", "RMT Over Time", "RMT", "rmt_over_time", None, multi_figure=True),
@@ -90,6 +94,26 @@ GRAPH_REGISTRY: list[GraphEntry] = [
 _REGISTRY_BY_KEY: dict[str, GraphEntry] = {e.key: e for e in GRAPH_REGISTRY}
 
 
+def _sub_labels(entry: GraphEntry, data, count: int) -> list[str]:
+    """Navigation sub-labels for a multi-figure result.
+
+    A result can be split two ways at once — a builder's own sub-figures
+    (``RMT50``/``RMT200``/…) and one copy per selected recording target — so
+    both are appended when present, giving ``"RMT Comparison — RMT50 — Right FDI"``.
+    """
+    keys = (data.get("figure_keys") if isinstance(data, dict) else None) or []
+    targets = (data.get("figure_targets") if isinstance(data, dict) else None) or []
+    labels: list[str] = []
+    for i in range(count):
+        parts = [entry.label]
+        if i < len(keys) and keys[i]:
+            parts.append(str(keys[i]))
+        if i < len(targets) and targets[i]:
+            parts.append(str(targets[i]))
+        labels.append(" — ".join(parts) if len(parts) > 1 else f"{entry.label} — {i + 1}")
+    return labels
+
+
 # ── Nav item ───────────────────────────────────────────
 
 @dataclass
@@ -122,6 +146,9 @@ class VisualizationPanel(ctk.CTkFrame):
         self._cortex_vars: dict[str, ctk.BooleanVar] = {}
         self._cortex_widgets: dict[str, ctk.CTkCheckBox] = {}
         self._cortex_options: list[str] = []
+        # "target" when the visit's muscle/side data drives the checkboxes,
+        # "cortex" for archives that predate recording targets, "" for neither.
+        self._selection_mode: str = ""
 
         # Figure cache: key → raw result tuple from plot_mem_graph
         self._figure_cache: dict[str, tuple] = {}
@@ -313,10 +340,18 @@ class VisualizationPanel(ctk.CTkFrame):
         self._populate_cortex_checkboxes()
         self._update_checkbox_availability()
 
-    # ── Cortex selection ──────────────────────────────────
+    # ── Recording-target selection ────────────────────────
 
     def _populate_cortex_checkboxes(self):
-        """Build cortex checkboxes from the controller's cortex options."""
+        """Build the recording-target checkboxes, or the cortex fallback.
+
+        A visit that recorded the same measures from several muscles/sides
+        (left FDI, right FDI, right TA) gets one checkbox per target, and every
+        ticked graph is then rendered once per ticked target.  Archives written
+        before recording targets existed carry no muscle data at all, so those
+        fall back to the original Stimulated Cortex checkboxes and behave
+        exactly as they did before.
+        """
         # Clear old widgets
         for w in self._cortex_frame.winfo_children():
             w.destroy()
@@ -326,18 +361,36 @@ class VisualizationPanel(ctk.CTkFrame):
         pid, date = self._controller.get_selected_participant()
         if pid is None or date is None:
             self._cortex_options = []
+            self._selection_mode = ""
+            self._controller.set_selected_targets([])
             self._cortex_frame.grid_remove()
             return
 
-        self._cortex_options = self._controller.get_cortex_options(pid, date)
+        targets = self._controller.get_target_options(pid, date)
+        if targets:
+            self._selection_mode = "target"
+            self._cortex_options = targets
+            heading = "Recording Target"
+            # The target subsumes the stimulated cortex (the hemisphere and the
+            # recorded side are contralateral), so only one of the two ever
+            # filters the data.
+            self._controller.set_selected_cortex(None)
+        else:
+            self._selection_mode = "cortex"
+            self._cortex_options = self._controller.get_cortex_options(pid, date)
+            heading = "Stimulated Cortex"
+            self._controller.set_selected_targets([])
+
         if len(self._cortex_options) < 2:
+            # Nothing to choose between — still push the single target through
+            # so the render path filters to it.
+            self._sync_cortex_to_controller()
             self._cortex_frame.grid_remove()
             return
 
-        # Show the cortex section
         self._cortex_frame.grid()
         ctk.CTkLabel(
-            self._cortex_frame, text="Stimulated Cortex", font=FONT_HEADING, anchor="w",
+            self._cortex_frame, text=heading, font=FONT_HEADING, anchor="w",
         ).grid(sticky="w", pady=(0, 2))
 
         for cv in self._cortex_options:
@@ -362,7 +415,7 @@ class VisualizationPanel(ctk.CTkFrame):
         self._sync_cortex_to_controller()
 
     def _on_cortex_changed(self):
-        """User toggled a cortex checkbox — update controller and regenerate."""
+        """User toggled a target/cortex checkbox — update and regenerate."""
         checked = [cv for cv, var in self._cortex_vars.items() if var.get()]
         if not checked:
             # Don't allow unchecking all — re-check the one that was just unchecked
@@ -384,14 +437,22 @@ class VisualizationPanel(ctk.CTkFrame):
         self._update_nav_buttons()
 
     def _sync_cortex_to_controller(self):
-        """Push the current cortex checkbox state to the controller."""
-        checked = [cv for cv, var in self._cortex_vars.items() if var.get()]
-        if len(checked) == 1:
-            self._controller.set_selected_cortex(checked[0])
-        elif len(checked) > 1:
-            self._controller.set_selected_cortex(checked)
+        """Push the current checkbox state to the controller."""
+        if self._cortex_vars:
+            checked = [cv for cv, var in self._cortex_vars.items() if var.get()]
         else:
-            self._controller.set_selected_cortex(None)
+            # No checkboxes were built (a single option, or none at all).
+            checked = list(self._cortex_options)
+
+        if self._selection_mode == "target":
+            self._controller.set_selected_targets(checked)
+        elif self._selection_mode == "cortex":
+            if len(checked) == 1:
+                self._controller.set_selected_cortex(checked[0])
+            elif len(checked) > 1:
+                self._controller.set_selected_cortex(checked)
+            else:
+                self._controller.set_selected_cortex(None)
 
     # ── Select All ─────────────────────────────────────────
 
@@ -625,10 +686,10 @@ class VisualizationPanel(ctk.CTkFrame):
         result = self._figure_cache[entry.key]
         figs, _axes, data = result[0], result[1], result[2]
 
-        if entry.multi_figure and isinstance(figs, list):
-            keys = data.get("figure_keys", [f"{i}" for i in range(len(figs))])
-            for i, (fig, sub_key) in enumerate(zip(figs, keys)):
-                self._nav_list.append(_NavItem(entry.key, i, f"{entry.label} — {sub_key}", fig))
+        if isinstance(figs, list):
+            labels = _sub_labels(entry, data, len(figs))
+            for i, (fig, label) in enumerate(zip(figs, labels)):
+                self._nav_list.append(_NavItem(entry.key, i, label, fig))
         else:
             fig = figs if isinstance(figs, Figure) else (figs[0] if figs else None)
             self._nav_list.append(_NavItem(entry.key, 0, entry.label, fig))
@@ -648,10 +709,10 @@ class VisualizationPanel(ctk.CTkFrame):
         result = self._figure_cache[entry.key]
         figs, _axes, data = result[0], result[1], result[2]
 
-        if entry.multi_figure and isinstance(figs, list):
-            keys = data.get("figure_keys", [f"{i}" for i in range(len(figs))])
-            for i, (fig, sub_key) in enumerate(zip(figs, keys)):
-                new_items.append(_NavItem(entry.key, i, f"{entry.label} — {sub_key}", fig))
+        if isinstance(figs, list):
+            labels = _sub_labels(entry, data, len(figs))
+            for i, (fig, label) in enumerate(zip(figs, labels)):
+                new_items.append(_NavItem(entry.key, i, label, fig))
         else:
             fig = figs if isinstance(figs, Figure) else (figs[0] if figs else None)
             new_items.append(_NavItem(entry.key, 0, entry.label, fig))
@@ -860,6 +921,13 @@ class VisualizationPanel(ctk.CTkFrame):
                 plot_data.get("figure_keys")
                 if isinstance(plot_data, dict) else None
             )
+            # Per-target results carry one plot-data dict per figure, so each
+            # caption quotes the values of the figure it sits under rather than
+            # the first target's.
+            figure_data = (
+                plot_data.get("figure_data")
+                if isinstance(plot_data, dict) else None
+            )
 
             if isinstance(figs, list):
                 for i, f in enumerate(figs):
@@ -869,8 +937,12 @@ class VisualizationPanel(ctk.CTkFrame):
                         figure_keys[i]
                         if figure_keys and i < len(figure_keys) else None
                     )
+                    caption_data = (
+                        figure_data[i]
+                        if figure_data and i < len(figure_data) else plot_data
+                    )
                     caption = caption_for(
-                        entry.graph_type, entry.measure, plot_data, sub_key,
+                        entry.graph_type, entry.measure, caption_data, sub_key,
                     )
                     items.append(ReportItem(
                         figure=f, caption=caption, section_key=entry.key,

@@ -857,7 +857,16 @@ def build_participant_visit_test_summary(participant_rows: pd.DataFrame) -> pd.D
                 "visit_number": visit_index,
                 "Date": visit_group["Date"].iloc[0],
                 "visit_label": visit_date.strftime("%d/%m/%Y"),
-                "mem_file_count": int(visit_group["source_file"].ne("").sum()),
+                # Count the contributing filenames, not the rows. A visit's rows
+                # each hold a "; "-joined list of the files that produced them,
+                # and there is now one row per recording target, so neither the
+                # row count nor a single cell is the number of .MEM files.
+                "mem_file_count": len({
+                    name.strip()
+                    for cell in visit_group["source_file"].tolist()
+                    for name in str(cell).split(";")
+                    if name.strip()
+                }),
                 "source_files": visit_group["source_file"].tolist(),
                 "days_since_previous_visit": elapsed_days,
                 "sides_tested": sides_tested,
@@ -2397,6 +2406,237 @@ def plot_participant_measure_over_time(
         png_dpi=png_dpi,
         show=show,
     )
+
+
+_CI_Z_SCORES = {0.90: 1.6448536, 0.95: 1.9599640, 0.99: 2.5758293}
+
+
+def plot_participant_measure_trajectory(
+    measure="t_sici",
+    participant_id=None,
+    mem_date=None,
+    mem_filename=None,
+    input_dir=None,
+    data_df=None,
+    value_column: str = None,
+    y_label: str = None,
+    title: str = None,
+    group_by_cortex: bool = False,
+    ci_level: float = 0.95,
+    output_png=None,
+    png_dpi: int = 300,
+    show: bool = True,
+):
+    """Plot one participant's averaged-measure trajectory against a cohort.
+
+    Every participant with two or more visits contributes one thin,
+    semi-translucent grey line — a single averaged value per visit
+    (``value_column``), aligned by **ordinal visit number** (1, 2, 3 …). The
+    selected participant is drawn thicker and in red on top, and a shaded band
+    shows the cohort **mean ± ``ci_level`` confidence interval** at each visit
+    number. The cohort is restricted to participants that share the selected
+    participant's ``Subject_type`` (ALS vs control); cortex matching is
+    inherited from the caller-supplied *data_df* (the GUI filters it to the
+    chosen cortex before calling, exactly like the over-time graph). The
+    ``group_by_cortex`` flag is accepted for GUI plumbing compatibility but the
+    trajectory pools whatever rows it is given.
+
+    Returns ``(figure, axis, plot_data)``. Raises :class:`ValueError` when the
+    selected participant does not have at least two visits with a value — the
+    trajectory is only meaningful for repeated visits.
+    """
+    try:
+        import matplotlib
+        if not show:
+            matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError as exc:
+        raise ImportError("matplotlib is required for trajectory plots.") from exc
+
+    config = waveform_measure_config(measure)
+    resolved_value_column = value_column or config["avg_column"]
+    resolved_df = load_mem_dataframe(input_dir=input_dir, data_df=data_df)
+    participant_rows, selected_rows, resolved_id = resolve_participant_context(
+        resolved_df,
+        participant_id=participant_id,
+        mem_date=mem_date,
+        mem_filename=mem_filename,
+    )
+
+    # --- Selected participant's visit series (must have >= 2 visits) ---
+    selected_summary, _ = build_participant_visit_summary(
+        participant_rows, value_column=resolved_value_column,
+    )
+    if len(selected_summary) < 2:
+        raise ValueError(
+            f"{format_participant_label(resolved_id)} has fewer than two visits "
+            f"with a {config['label']} value; a trajectory needs repeated visits."
+        )
+    selected_summary = selected_summary.reset_index(drop=True)
+    selected_summary["visit_number"] = np.arange(1, len(selected_summary) + 1)
+
+    # --- Cohort: participants of the same Subject_type with >= 2 visits ---
+    def _latest_non_missing(series) -> str | None:
+        vals = (
+            series.astype("string").fillna("").str.strip()
+            .replace("", pd.NA).dropna()
+        )
+        return str(vals.iloc[-1]) if not vals.empty else None
+
+    subject_type = None
+    if "Subject_type" in participant_rows.columns:
+        subject_type = _latest_non_missing(participant_rows["Subject_type"])
+
+    cohort_df = resolved_df
+    if subject_type is not None and "Subject_type" in resolved_df.columns:
+        st = resolved_df["Subject_type"].astype("string").fillna("").str.strip()
+        cohort_df = resolved_df[st == subject_type]
+
+    numeric_id = pd.to_numeric(cohort_df["ID"], errors="coerce")
+    cohort_ids = numeric_id.dropna().astype(int).unique().tolist()
+
+    cohort_series: dict[int, pd.DataFrame] = {}
+    for cid in cohort_ids:
+        cid_rows = cohort_df[numeric_id == cid]
+        try:
+            summ, _ = build_participant_visit_summary(
+                cid_rows, value_column=resolved_value_column,
+            )
+        except ValueError:
+            continue
+        if len(summ) < 2:
+            continue  # only repeated-visit participants form the grey background
+        summ = summ.reset_index(drop=True)
+        summ["visit_number"] = np.arange(1, len(summ) + 1)
+        cohort_series[int(cid)] = summ
+    # Guarantee the selected participant is represented (they qualify by >= 2 visits).
+    cohort_series[int(resolved_id)] = selected_summary
+
+    # --- Cohort mean +/- CI band per visit number ---
+    by_visit: dict[int, list[float]] = {}
+    for summ in cohort_series.values():
+        for vnum, val in zip(summ["visit_number"], summ["visit_value"]):
+            by_visit.setdefault(int(vnum), []).append(float(val))
+
+    z = _CI_Z_SCORES.get(round(float(ci_level), 2), 1.9599640)
+    mean_x, mean_y = [], []
+    band_x, band_lo, band_hi = [], [], []
+    for k in sorted(by_visit):
+        vals = by_visit[k]
+        m = float(np.mean(vals))
+        mean_x.append(k)
+        mean_y.append(m)
+        if len(vals) >= 2:
+            sem = float(np.std(vals, ddof=1)) / (len(vals) ** 0.5)
+            band_x.append(k)
+            band_lo.append(m - z * sem)
+            band_hi.append(m + z * sem)
+
+    # --- Draw ---
+    figure, axis = plt.subplots(figsize=STANDARD_FIGSIZE)
+
+    grey = "#AEB6BF"
+    all_y: list[float] = []
+    grey_labelled = False
+    for cid, summ in cohort_series.items():
+        if int(cid) == int(resolved_id):
+            continue  # the selected participant is drawn in red, not grey
+        all_y.extend(summ["visit_value"].tolist())
+        axis.plot(
+            summ["visit_number"], summ["visit_value"],
+            color=grey, linewidth=0.9, alpha=0.35, zorder=2,
+            label=None if grey_labelled else "Other participants",
+        )
+        axis.scatter(
+            summ["visit_number"], summ["visit_value"],
+            s=14, color=grey, alpha=0.30, linewidths=0, zorder=2,
+        )
+        grey_labelled = True
+
+    ci_pct = int(round(float(ci_level) * 100))
+    if band_x:
+        axis.fill_between(
+            band_x, band_lo, band_hi,
+            color="#8290A0", alpha=0.18, zorder=1.6,
+            label=f"Cohort mean ± {ci_pct}% CI",
+        )
+        all_y.extend(band_lo)
+        all_y.extend(band_hi)
+    if mean_x:
+        axis.plot(
+            mean_x, mean_y,
+            color="#5D6D7E", linewidth=1.7, alpha=0.9, zorder=3,
+            label=None if band_x else "Cohort mean",
+        )
+        all_y.extend(mean_y)
+
+    plabel = format_participant_label(resolved_id)
+    red = "#C0392B"
+    axis.plot(
+        selected_summary["visit_number"], selected_summary["visit_value"],
+        color=red, linewidth=2.6, alpha=1.0, zorder=6, label=plabel,
+    )
+    axis.scatter(
+        selected_summary["visit_number"], selected_summary["visit_value"],
+        s=70, facecolors=red, edgecolors="#7B241C", linewidths=1.0,
+        alpha=1.0, zorder=7,
+    )
+    all_y.extend(selected_summary["visit_value"].tolist())
+
+    reference_line = reference_line_for_value_column(resolved_value_column)
+    if reference_line is not None:
+        draw_reference_line(axis, reference_line)
+        all_y.append(reference_line)
+
+    max_visit = max(int(k) for k in by_visit) if by_visit else len(selected_summary)
+    axis.set_xlim(0.5, max_visit + 0.5)
+    axis.set_xticks(list(range(1, max_visit + 1)))
+    axis.set_ylim(*_tsici_ylim(min(all_y), max(all_y)))
+    axis.set_xlabel("Visit number")
+    axis.set_ylabel(y_label or f"Mean {config['label']} (%)")
+
+    if title is None:
+        title = f"{plabel} | {config['label']} trajectory"
+    axis.set_title(title, fontsize=14, pad=14)
+
+    axis.set_facecolor("#FFFFFF")
+    axis.grid(False)
+    axis.spines["top"].set_visible(False)
+    axis.spines["right"].set_visible(False)
+    axis.spines["left"].set_color("#73839A")
+    axis.spines["bottom"].set_color("#73839A")
+    axis.spines["left"].set_linewidth(1.1)
+    axis.spines["bottom"].set_linewidth(1.1)
+    axis.tick_params(axis="x", colors="#17202A", labelsize=11)
+    axis.tick_params(axis="y", colors="#4C5B70", labelsize=11)
+    axis.legend(frameon=False, loc="best", fontsize=9)
+
+    saved_png = ""
+    if output_png is not None:
+        output_path = Path(output_png)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(output_path, dpi=png_dpi, bbox_inches="tight")
+        saved_png = str(output_path.resolve())
+
+    plot_data = {
+        "measure": measure,
+        "value_column": resolved_value_column,
+        "participant_id": resolved_id,
+        "subject_type": subject_type,
+        "selected_rows": selected_rows.reset_index(drop=True),
+        "visit_summary": selected_summary.reset_index(drop=True),
+        "visit_count": int(len(selected_summary)),
+        "cohort_ids": sorted(int(c) for c in cohort_series),
+        "cohort_size": int(len(cohort_series)),
+        "cohort_mean_by_visit": dict(zip(mean_x, mean_y)),
+        "ci_level": float(ci_level),
+        "saved_png": saved_png,
+    }
+
+    figure.tight_layout()
+    if show and plt.get_backend().lower() != "agg":
+        plt.show()
+    return figure, axis, plot_data
 
 
 def plot_participant_measure_visit_profiles(
@@ -3969,6 +4209,8 @@ def plot_mem_graph(graph_type: str = "grouped", measure: str = "t_sici", **kwarg
         return plot_participant_measure_over_time(measure=measure, **kwargs)
     if normalized_type in {"participant_visit_profiles", "visit_profiles", "visit_profile_grid"}:
         return plot_participant_measure_visit_profiles(measure=measure, **kwargs)
+    if normalized_type in {"trajectory", "measure_trajectory", "cohort_trajectory"}:
+        return plot_participant_measure_trajectory(measure=measure, **kwargs)
     if normalized_type in {"participant_visit_timeline", "visit_timeline", "visit_dates"}:
         return plot_participant_visit_timeline(**kwargs)
     if normalized_type in {"visit_table", "visit_tests", "visit_summary", "visit_test_table"}:
@@ -3982,8 +4224,8 @@ def plot_mem_graph(graph_type: str = "grouped", measure: str = "t_sici", **kwarg
 
     raise ValueError(
         "Unsupported graph_type. Supported values are: profile, grouped, participant_over_time, "
-        "participant_visit_profiles, participant_visit_timeline, visit_table, rmt_over_time, "
-        "rmt_comparison, rmt_grouped."
+        "participant_visit_profiles, trajectory, participant_visit_timeline, visit_table, "
+        "rmt_over_time, rmt_comparison, rmt_grouped."
     )
 
 

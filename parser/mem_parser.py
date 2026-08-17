@@ -13,11 +13,27 @@ parse_mem_directory(input_dir) -> list[dict]
 
 from __future__ import annotations
 
+import json
 import re
 import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
+
+from parser.recording_target import (
+    MUSCLE_COLUMN,
+    SIDE_COLUMN,
+    extract_muscle,
+    extract_recorded_side,
+    extract_sr_sites_target,
+)
+from parser.sr_parser import SR_CURVE_COLUMN, SR_MAX_COLUMN, extract_sr_block
+from parser.strength_duration_parser import (
+    SD_POINTS_COLUMN,
+    SD_RHEOBASE_COLUMN,
+    SD_TAU_COLUMN,
+    extract_sd_block,
+)
 
 # ---------------------------------------------------------------------------
 # Constants -- ISI labels and waveform block markers
@@ -61,6 +77,7 @@ def output_column_order() -> list[str]:
     """Return the standard output column order for parsed MEM data."""
     return (
         ["Study", "ID", "Date", "Age", "Sex", "Subject_type", "Stimulated_cortex",
+         MUSCLE_COLUMN, SIDE_COLUMN,
          "RMT50", "RMT200", "RMT1000"]
         + [col for level in CSP_RMT_LEVELS
            for col in (f"CSPs_{level}", f"CSPe_{level}", f"CSP_{level}")]
@@ -70,6 +87,9 @@ def output_column_order() -> list[str]:
         + [f"A_SICF_{isi}" for isi in ASICF_ISIS] + ["A_SICF_avg"]
         + ["T_SICI_isi_n", "T_SICF_isi_n", "A_SICI_isi_n", "A_SICF_isi_n"]
         + ["TMS_coil"]
+        + [SR_MAX_COLUMN]
+        + [SD_RHEOBASE_COLUMN, SD_TAU_COLUMN]
+        + [SR_CURVE_COLUMN, SD_POINTS_COLUMN]
         + ["CMAP_table", "MUNIX_table", "source_file"]
     )
 
@@ -88,6 +108,8 @@ def initialize_record() -> dict:
         "Sex": None,
         "Subject_type": None,
         "Stimulated_cortex": None,
+        MUSCLE_COLUMN: None,
+        SIDE_COLUMN: None,
         "RMT50": None,
         "RMT200": None,
         "RMT1000": None,
@@ -100,6 +122,11 @@ def initialize_record() -> dict:
         "A_SICI_isi_n": None,
         "A_SICF_isi_n": None,
         "TMS_coil": None,
+        SR_MAX_COLUMN: None,
+        SD_RHEOBASE_COLUMN: None,
+        SD_TAU_COLUMN: None,
+        SR_CURVE_COLUMN: None,
+        SD_POINTS_COLUMN: None,
     }
     for isi in TSICI_ISIS:
         record[f"T_SICI_{isi}"] = None
@@ -228,11 +255,30 @@ _HEADER_PARSERS: dict[str, tuple[str, Callable] | Callable] = {
     "Sex:": ("Sex", lambda s: _extract_match(r"Sex:\s+([MF])", s)),
     "Subject type:": ("Subject_type", _extract_subject_type),
     "Stim/record": ("Stimulated_cortex", _extract_stimulated_cortex),
+    "Muscle:": (MUSCLE_COLUMN, extract_muscle),
     "TMS Coil:": ("TMS_coil", _extract_tms_coil),
 }
 
 
+def _parse_sr_sites(stripped: str, record: dict) -> None:
+    """Fill muscle/side from the peripheral files' ``S/R sites:`` header.
+
+    Those files carry neither ``Muscle:`` nor ``Stim/record:``, so this is the
+    only way their recording target can be identified — and identifying it is
+    what puts a visit's peripheral recording on the same row as the cortical
+    recording of the same muscle and side.
+    """
+    muscle, side = extract_sr_sites_target(stripped)
+    if muscle is not None and record[MUSCLE_COLUMN] is None:
+        record[MUSCLE_COLUMN] = muscle
+    if side is not None and record[SIDE_COLUMN] is None:
+        record[SIDE_COLUMN] = side
+
+
 def _parse_header_field(stripped: str, record: dict) -> None:
+    if stripped.startswith("S/R sites:"):
+        _parse_sr_sites(stripped, record)
+        return
     for prefix, entry in _HEADER_PARSERS.items():
         if stripped.startswith(prefix):
             if prefix == "Name:":
@@ -246,6 +292,12 @@ def _parse_header_field(stripped: str, record: dict) -> None:
                 value = parser(stripped)
                 if value is not None:
                     record[key] = value
+                if prefix == "Stim/record":
+                    # The same line carries the recorded side on the right of
+                    # the arrow ("L->R": stimulate left cortex, record right).
+                    side = extract_recorded_side(stripped)
+                    if side is not None:
+                        record[SIDE_COLUMN] = side
             return
 
 
@@ -519,6 +571,27 @@ def parse_mem_file(filepath: str | Path) -> dict:
         _extract_waveform_block_values(
             lines, ASICF_BLOCK_MARKER, ASICF_ISIS, float,
         ),
+    )
+
+    # Stimulus-response block (peripheral nerve-excitability files). The
+    # reference Max CMAP amplitude is stored as a scalar; the full recruitment
+    # curve is also persisted (as JSON) so the plot can be rebuilt from an
+    # archived CSV without re-reading the source .MEM.
+    sr_block = extract_sr_block(lines)
+    record[SR_MAX_COLUMN] = sr_block["max_cmap_1ms"]
+    record[SR_CURVE_COLUMN] = (
+        json.dumps(sr_block["curve"]) if sr_block["curve"] else None
+    )
+
+    # Strength-duration block (same peripheral files). The two QtracP-derived
+    # scalars (rheobase, strength-duration time constant) are stored, plus the
+    # per-duration charge-duration points (as JSON) so the strength-duration
+    # and charge-duration plots can likewise be rebuilt from an archived CSV.
+    sd_block = extract_sd_block(lines)
+    record[SD_RHEOBASE_COLUMN] = sd_block["rheobase_mA"]
+    record[SD_TAU_COLUMN] = sd_block["tau_sd_ms"]
+    record[SD_POINTS_COLUMN] = (
+        json.dumps(sd_block["points"]) if sd_block["points"] else None
     )
 
     # Fallback Study from filename

@@ -28,6 +28,8 @@ from reports.pdf_layout import (
     ReportItem,
     build_letterhead_banner_page,
     compose_four_per_page,
+    generation_date_string,
+    stamp_page_footer,
 )
 from reports.report_builder import build_report_figures
 
@@ -128,14 +130,20 @@ def render_figures_to_pdf(
     )
     body_pages = compose_four_per_page(body_items)
 
+    # Stamp every page (cover included) with the generation date and page
+    # number. The count includes the cover, so the cover reads "Page 1 of N".
+    all_pages = [first_page, *body_pages]
+    date_generated = generation_date_string()
+    total_pages = len(all_pages)
+    for page_number, page in enumerate(all_pages, start=1):
+        stamp_page_footer(page, page_number, total_pages, date_generated)
+
     with PdfPages(output_path) as pdf:
-        pdf.savefig(first_page)
-        for page in body_pages:
+        for page in all_pages:
             pdf.savefig(page)
 
     # Clean up the composed page figures (originals are owned by the caller).
-    plt.close(first_page)
-    for page in body_pages:
+    for page in all_pages:
         plt.close(page)
 
     return output_path.resolve()
@@ -144,6 +152,48 @@ def render_figures_to_pdf(
 # ---------------------------------------------------------------------------
 # Convenience: full report in one call
 # ---------------------------------------------------------------------------
+
+def _build_all_target_figures(
+    participant_id,
+    data_df: pd.DataFrame,
+    **kwargs,
+) -> list:
+    """Build report figures, once per recording target when there is more than one.
+
+    A visit recorded from several muscles (left FDI, right FDI, right TA) would
+    otherwise draw all of them onto the same axes as if they were repeats of
+    one recording. Each target instead gets its own set of sections, named in
+    the figure titles; the title page is built once, from the first target's
+    pass, and already lists every muscle recorded.
+    """
+    from processing.df_builder import target_labels_in
+
+    rows = data_df[pd.to_numeric(data_df["ID"], errors="coerce") == participant_id]
+    targets = target_labels_in(rows)
+    if len(targets) < 2:
+        return build_report_figures(
+            participant_id=participant_id, data_df=data_df, **kwargs,
+        )
+
+    items: list = []
+    sections = kwargs.pop("included_sections", None)
+    for index, target in enumerate(targets):
+        target_items = build_report_figures(
+            participant_id=participant_id,
+            data_df=data_df,
+            included_sections=sections,
+            recording_target=target,
+            **kwargs,
+        )
+        if index > 0:
+            # One title page for the whole report, not one per muscle.
+            target_items = [
+                it for it in target_items
+                if getattr(it, "section_key", None) != "summary"
+            ]
+        items.extend(target_items)
+    return items
+
 
 def generate_participant_report(
     participant_id,
@@ -154,6 +204,7 @@ def generate_participant_report(
     age_window: int = 5,
     show: bool = False,
     mem_date: str | None = None,
+    mem_dir=None,
 ) -> Path:
     """Generate a multi-page PDF report for one participant.
 
@@ -203,13 +254,14 @@ def generate_participant_report(
 
     import matplotlib.pyplot as plt
 
-    items = build_report_figures(
+    items = _build_all_target_figures(
         participant_id=participant_id,
         data_df=data_df,
         included_sections=included_sections,
         age_window=age_window,
         show=show,
         mem_date=mem_date,
+        mem_dir=mem_dir,
     )
 
     try:

@@ -23,6 +23,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from parser.recording_target import (
+    MUSCLE_COLUMN,
+    SIDE_COLUMN,
+    is_hand_muscle,
+    target_label,
+)
 from processing.redcap_mapper import (
     REDCAP_COLUMN_ORDER,
     REDCAP_COMPLETION_COLS,
@@ -284,6 +290,27 @@ def _write_change_report_xlsx(
 # Main engine
 # ---------------------------------------------------------------------------
 
+def _non_exported_targets(py_snbr: pd.DataFrame) -> list[str]:
+    """Recording targets that lose the one-row-per-visit race, for reporting.
+
+    REDCap keeps a single record per participant-visit, so only the hand
+    recording is exported. Naming the targets that were left out keeps that
+    silent narrowing visible to whoever runs the export.
+    """
+    if MUSCLE_COLUMN not in py_snbr.columns or py_snbr.empty:
+        return []
+    dropped: set[str] = set()
+    for (_pid, _date), group in py_snbr.groupby(["ID", "date_iso"], dropna=True):
+        if len(group) < 2:
+            continue
+        kept = group["_target_rank"].min()
+        for _, row in group[group["_target_rank"] > kept].iterrows():
+            label = target_label(row[MUSCLE_COLUMN], row.get(SIDE_COLUMN))
+            if label:
+                dropped.add(label)
+    return sorted(dropped)
+
+
 def generate_redcap_import(
     py_dataframe: pd.DataFrame,
     redcap_data_csv: Path,
@@ -324,16 +351,30 @@ def generate_redcap_import(
         lambda v: str(v).strip().upper() if pd.notna(v) else None
     )
 
-    # Deduplicate for REDCap: keep only the first MEM file per (ID, date).
-    # The suffix character (last char of filename stem, e.g. "A", "B", "C")
-    # determines file ordering within the same participant visit.
+    # Deduplicate for REDCap: keep only one row per (ID, date). REDCap holds a
+    # single record per participant-visit, while a visit may now carry one row
+    # per recording target (left FDI, right FDI, right TA...).
+    #
+    # The hand recording wins. Every historical REDCap record is a hand
+    # recording, so preferring FDI/APB/ADM keeps the exported values matching
+    # what is already stored; leg recordings are simply not pushed, rather than
+    # overwriting a hand value with a leg one. Within a target, the suffix
+    # character (last char of the filename stem, e.g. "A", "B", "C") keeps the
+    # original file ordering.
+    if MUSCLE_COLUMN in py_snbr.columns:
+        py_snbr["_target_rank"] = py_snbr[MUSCLE_COLUMN].apply(
+            lambda m: 0 if is_hand_muscle(m) else (1 if pd.notna(m) else 2)
+        )
+    else:
+        py_snbr["_target_rank"] = 0
     py_snbr["_file_suffix"] = py_snbr["source_file"].apply(
         lambda f: Path(str(f)).stem[-1].upper() if pd.notna(f) else "Z"
     )
+    dropped_targets = _non_exported_targets(py_snbr)
     py_snbr = (
-        py_snbr.sort_values("_file_suffix", ascending=True)
+        py_snbr.sort_values(["_target_rank", "_file_suffix"], ascending=True)
         .drop_duplicates(subset=["ID", "date_iso"], keep="first")
-        .drop(columns=["_file_suffix"])
+        .drop(columns=["_target_rank", "_file_suffix"])
     )
 
     py_rc = to_redcap_dataframe(py_snbr)
@@ -385,6 +426,7 @@ def generate_redcap_import(
         "per_participant": [],
         "skipped_new_ids": skipped_new_ids,
         "new_ids_added": [],
+        "skipped_targets": dropped_targets,
     }
 
     for _, py_row in py_rc.iterrows():

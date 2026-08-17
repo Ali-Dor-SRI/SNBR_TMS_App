@@ -148,6 +148,8 @@ _OVER_TIME_TYPES = {
 
 _PROFILE_TYPES = {"profile", "measure_profile", "csp_profile"}
 
+_TRAJECTORY_TYPES = {"trajectory", "measure_trajectory", "cohort_trajectory"}
+
 
 def _measure_display_label(measure: str | None) -> str:
     """Best-effort human label for a measure key."""
@@ -195,6 +197,45 @@ def caption_for(
     norm_type = str(graph_type).strip().lower().replace("-", "_").replace(" ", "_")
     metric_label = _measure_display_label(measure)
 
+    # --- Stimulus-Response (peripheral recruitment scatter) ---
+    if norm_type == "stimulus_response":
+        max_cmap = plot_data.get("sr_max_cmap_1ms")
+        if max_cmap is None:
+            return None
+        point_count = plot_data.get("sr_point_count")
+        base = f"Max CMAP at 1 ms: {format_value(max_cmap)} mV"
+        return f"{base}   |   {int(point_count)} points" if point_count else base
+
+    # --- Strength-duration curve (participant only) ---
+    if norm_type == "strength_duration_curve":
+        rheobase = plot_data.get("rheobase_mA")
+        tau = plot_data.get("tau_sd_ms")
+        if rheobase is None and tau is None:
+            return None
+        point_count = plot_data.get("sd_point_count")
+        base = (
+            f"Rheobase: {format_value(rheobase)} mA   |   "
+            f"τSD: {format_value(tau)} ms"
+        )
+        return f"{base}   |   {int(point_count)} points" if point_count else base
+
+    # --- Charge-duration (Weiss linearization) ---
+    if norm_type == "charge_duration_weiss":
+        rheobase = plot_data.get("rheobase_mA")
+        tau = plot_data.get("tau_sd_ms")
+        if rheobase is None and tau is None:
+            return None
+        r_squared = plot_data.get("r_squared")
+        point_count = plot_data.get("sd_point_count")
+        parts = [f"Slope (rheobase): {format_value(rheobase)} mA"]
+        if tau is not None:
+            parts.append(f"x-intercept: {format_value(-tau)} ms")
+        if r_squared is not None:
+            parts.append(f"R² = {r_squared:.3f}")
+        if point_count:
+            parts.append(f"{int(point_count)} points")
+        return "   |   ".join(parts)
+
     # --- Grouped / cohort comparison ---
     # The violin group-comparison plots now render per-column summary stats
     # (n, mean ± sd, per-cortex values) directly below each x-tick label in
@@ -218,6 +259,24 @@ def caption_for(
                 metric_label=plot_data.get("value_column") or metric_label,
             )
         return None
+
+    # --- Cohort trajectory (repeated-visit line vs same-type cohort) ---
+    if norm_type in _TRAJECTORY_TYPES:
+        summary = plot_data.get("visit_summary")
+        base = (
+            latest_visit_caption(summary, metric_label=metric_label)
+            if summary is not None else None
+        )
+        n = plot_data.get("cohort_size")
+        visits = plot_data.get("visit_count")
+        extra = []
+        if visits:
+            extra.append(f"{int(visits)} visits")
+        if n:
+            extra.append(f"cohort n={int(n)}")
+        if base and extra:
+            return f"{base}   |   " + "   |   ".join(extra)
+        return base
 
     # --- Profile ---
     if norm_type in _PROFILE_TYPES:

@@ -352,12 +352,22 @@ class ParticipantPanel(ctk.CTkFrame):
 
         self._controller.set_selected_participant(pid, selected_date)
 
-        # Store cortex options — visualization panel handles the selection UI
-        cortex_options = self._controller.get_cortex_options(pid, selected_date, study)
-        if len(cortex_options) > 1:
-            self._controller.set_selected_cortex(cortex_options)
+        # Seed the recording-target selection — the visualization panel owns the
+        # selection UI. Visits whose files identify a muscle select every target;
+        # archives that predate recording targets fall back to the cortex options.
+        target_options = self._controller.get_target_options(pid, selected_date, study)
+        if target_options:
+            self._controller.set_selected_targets(target_options)
+            self._controller.set_selected_cortex(None)
         else:
-            self._controller.set_selected_cortex(cortex_options[0] if cortex_options else None)
+            self._controller.set_selected_targets([])
+            cortex_options = self._controller.get_cortex_options(pid, selected_date, study)
+            if len(cortex_options) > 1:
+                self._controller.set_selected_cortex(cortex_options)
+            else:
+                self._controller.set_selected_cortex(
+                    cortex_options[0] if cortex_options else None
+                )
         self._on_next()
 
     def _confirm_excluded(self, pid: int) -> bool:

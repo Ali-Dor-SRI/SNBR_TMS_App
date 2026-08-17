@@ -5,6 +5,7 @@ import threading
 import customtkinter as ctk
 
 from gui.controller import AppController
+from gui.nav import next_visible_page, prev_visible_page
 from gui.data_mode_panel import DataModePanel
 from gui.exclusion_panel import ExclusionPanel
 from gui.email_panel import EmailPanel
@@ -170,12 +171,16 @@ class TMSApp(ctk.CTk):
         welcome.grid(row=0, column=0, sticky="nsew")
         self._pages["welcome"] = welcome
 
+        # Pages 1-9 use computed linear navigation: Next/Back move to the next
+        # or previous page that the user has NOT chosen to skip (see
+        # _next_page / _prev_page). With no skips this is the plain 1→2→3 flow.
+
         # Page 1 — path selection
         file_panel = FilePanel(
             self._container,
             controller=self._controller,
-            on_next=lambda: self._show_page("data_mode"),
-            on_back=lambda: self._show_page("welcome"),
+            on_next=lambda: self._show_page(self._next_page("file_panel")),
+            on_back=lambda: self._show_page(self._prev_page("file_panel")),
         )
         file_panel.grid(row=0, column=0, sticky="nsew")
         self._pages["file_panel"] = file_panel
@@ -184,18 +189,18 @@ class TMSApp(ctk.CTk):
         data_mode = DataModePanel(
             self._container,
             controller=self._controller,
-            on_next=lambda: self._show_page("exclusion"),
-            on_back=lambda: self._show_page("file_panel"),
+            on_next=lambda: self._show_page(self._next_page("data_mode")),
+            on_back=lambda: self._show_page(self._prev_page("data_mode")),
         )
         data_mode.grid(row=0, column=0, sticky="nsew")
         self._pages["data_mode"] = data_mode
 
-        # Page 3 — exclude participants from averages
+        # Page 3 — exclude participants from averages (skippable)
         exclusion = ExclusionPanel(
             self._container,
             controller=self._controller,
-            on_next=lambda: self._show_page("participant"),
-            on_back=lambda: self._show_page("data_mode"),
+            on_next=lambda: self._show_page(self._next_page("exclusion")),
+            on_back=lambda: self._show_page(self._prev_page("exclusion")),
         )
         exclusion.grid(row=0, column=0, sticky="nsew")
         self._pages["exclusion"] = exclusion
@@ -204,8 +209,8 @@ class TMSApp(ctk.CTk):
         participant = ParticipantPanel(
             self._container,
             controller=self._controller,
-            on_next=lambda: self._show_page("visualization"),
-            on_back=lambda: self._show_page("exclusion"),
+            on_next=lambda: self._show_page(self._next_page("participant")),
+            on_back=lambda: self._show_page(self._prev_page("participant")),
         )
         participant.grid(row=0, column=0, sticky="nsew")
         self._pages["participant"] = participant
@@ -214,8 +219,8 @@ class TMSApp(ctk.CTk):
         visualization = VisualizationPanel(
             self._container,
             controller=self._controller,
-            on_next=lambda: self._show_page("export"),
-            on_back=lambda: self._show_page("participant"),
+            on_next=lambda: self._show_page(self._next_page("visualization")),
+            on_back=lambda: self._show_page(self._prev_page("visualization")),
         )
         visualization.grid(row=0, column=0, sticky="nsew")
         self._pages["visualization"] = visualization
@@ -224,38 +229,38 @@ class TMSApp(ctk.CTk):
         export = ExportPanel(
             self._container,
             controller=self._controller,
-            on_next=lambda: self._show_page("email"),
-            on_back=lambda: self._show_page("visualization"),
+            on_next=lambda: self._show_page(self._next_page("export")),
+            on_back=lambda: self._show_page(self._prev_page("export")),
         )
         export.grid(row=0, column=0, sticky="nsew")
         self._pages["export"] = export
 
-        # Page 7 — Email report
+        # Page 7 — Email report (skippable)
         email = EmailPanel(
             self._container,
             controller=self._controller,
-            on_next=lambda: self._show_page("redcap"),
-            on_back=lambda: self._show_page("export"),
+            on_next=lambda: self._show_page(self._next_page("email")),
+            on_back=lambda: self._show_page(self._prev_page("email")),
         )
         email.grid(row=0, column=0, sticky="nsew")
         self._pages["email"] = email
 
-        # Page 8 — REDCap export
+        # Page 8 — REDCap export (skippable)
         redcap = RedcapPanel(
             self._container,
             controller=self._controller,
-            on_next=lambda: self._show_page("sync"),
-            on_back=lambda: self._show_page("email"),
+            on_next=lambda: self._show_page(self._next_page("redcap")),
+            on_back=lambda: self._show_page(self._prev_page("redcap")),
         )
         redcap.grid(row=0, column=0, sticky="nsew")
         self._pages["redcap"] = redcap
 
-        # Page 9 — backup & sync
+        # Page 9 — backup & sync (skippable)
         sync = SyncPanel(
             self._container,
             controller=self._controller,
-            on_next=lambda: self._show_page("finish"),
-            on_back=lambda: self._show_page("redcap"),
+            on_next=lambda: self._show_page(self._next_page("sync")),
+            on_back=lambda: self._show_page(self._prev_page("sync")),
         )
         sync.grid(row=0, column=0, sticky="nsew")
         self._pages["sync"] = sync
@@ -265,7 +270,7 @@ class TMSApp(ctk.CTk):
             self._container,
             controller=self._controller,
             on_restart=lambda: self._show_page("participant"),
-            on_back=lambda: self._show_page("sync"),
+            on_back=lambda: self._show_page(self._prev_page("finish")),
         )
         finish.grid(row=0, column=0, sticky="nsew")
         self._pages["finish"] = finish
@@ -304,6 +309,18 @@ class TMSApp(ctk.CTk):
             return self._page_order.index(self._current_page)
         except ValueError:
             return 0
+
+    def _next_page(self, current: str) -> str:
+        """Next page in the flow the user hasn't skipped (see next_visible_page)."""
+        return next_visible_page(
+            self._page_order, self._controller.get_skipped_pages(), current,
+        )
+
+    def _prev_page(self, current: str) -> str:
+        """Previous page in the flow the user hasn't skipped."""
+        return prev_visible_page(
+            self._page_order, self._controller.get_skipped_pages(), current,
+        )
 
     def _on_page_jump(self, selected_label: str):
         """Handle a selection from the page-jump dropdown."""

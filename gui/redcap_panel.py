@@ -403,6 +403,15 @@ class RedcapPanel(ctk.CTkFrame):
                 msg += f"\nWarnings: {len(qc['warnings'])}"
             self._status_label.configure(text_color=SUCCESS_COLOR)
 
+        # REDCap holds one record per participant-visit, so only the hand
+        # recording is exported. Name what that left out.
+        skipped_targets = summary.get("skipped_targets") or []
+        if skipped_targets:
+            msg += (
+                "\nNot exported (REDCap keeps one record per visit): "
+                + ", ".join(skipped_targets)
+            )
+
         self._status_var.set(msg)
 
     def _on_error(self, msg: str):

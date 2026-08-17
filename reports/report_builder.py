@@ -18,12 +18,15 @@ from __future__ import annotations
 
 import pandas as pd
 
+from parser.recording_target import MUSCLE_COLUMN, SIDE_COLUMN, target_label
+from processing.df_builder import restrict_participant_to_target, target_labels_in
 from reports.captions import (
+    caption_for,
     csp_profile_caption,
     grouped_caption,
     latest_visit_caption,
 )
-from reports.pdf_layout import ReportItem
+from reports.pdf_layout import ReportItem, generation_date_string
 from processing.visualizer import (
     CSP_MEASURE_LABEL,
     VISIT_TABLE_COLUMN_WIDTHS,
@@ -39,6 +42,7 @@ from processing.visualizer import (
     plot_participant_csp_over_time,
     plot_participant_csp_visit_profiles,
     plot_participant_measure_over_time,
+    plot_participant_measure_trajectory,
     plot_participant_measure_visit_profiles,
     plot_participant_rmt_over_time,
     plot_participant_visit_test_table,
@@ -47,6 +51,12 @@ from processing.visualizer import (
     resolve_participant_context,
     waveform_measure_config,
 )
+from processing.figure_style import enlarge_axes_fonts
+
+# Sections whose figures are tables (CMAP / MUNIX / visit table) or the
+# letterhead summary. Their layouts are hand-tuned, so the axis-text
+# enlargement (processing.figure_style) skips them.
+_SKIP_FONT_ENLARGE = frozenset({"summary", "visit_table", "cmap_table", "munix_table"})
 
 # ---------------------------------------------------------------------------
 # Section catalogue
@@ -66,12 +76,12 @@ CSP_REPORT_SECTIONS = [
 
 ALL_REPORT_SECTION_ALIASES = {"everything", "all", "all_sections", "full_report"}
 
-_LONGITUDINAL_SUFFIXES = ("_over_time", "_visit_profiles")
+_LONGITUDINAL_SUFFIXES = ("_over_time", "_visit_profiles", "_trajectory")
 
 _SECTIONS_REQUIRING_DATES = {"visit_table"}
 
 _DATE_DEPENDENT_SUFFIXES = (
-    "_over_time", "_visit_profiles",
+    "_over_time", "_visit_profiles", "_trajectory",
     "_overall", "_age_matched", "_sex_matched", "_sex_age_matched",
     "_profile",
 )
@@ -95,7 +105,10 @@ DEFAULT_REPORT_SECTIONS = [
     "visit_table",
     "cmap_table",
     "munix_table",
+    "strength_duration_curve",
+    "charge_duration_weiss",
     *_waveform_sections("t_sici"),
+    "t_sici_trajectory",
     "rmt_over_time",
 ]
 
@@ -112,8 +125,11 @@ def supported_report_sections() -> list[str]:
         "visit_table",
         "cmap_table",
         "munix_table",
+        "strength_duration_curve",
+        "charge_duration_weiss",
     ]
     keys.extend(_waveform_sections("t_sici"))
+    keys.append("t_sici_trajectory")
     keys.extend([
         "rmt_over_time",
         "rmt_overall",
@@ -215,6 +231,24 @@ def _latest_non_missing_study(rows: pd.DataFrame) -> str:
     return str(vals.iloc[-1]) if not vals.empty else "Unknown"
 
 
+def _recording_targets_text(rows: pd.DataFrame) -> str:
+    """List the muscles/sides these rows were recorded from, e.g. ``"Right FDI"``.
+
+    Always shown on the report's title page. When a visit recorded only one
+    target this is the *only* place the muscle is named — the individual plot
+    titles stay uncluttered — so it must not be omitted just because there is
+    nothing to disambiguate.
+    """
+    if MUSCLE_COLUMN not in rows.columns:
+        return "Unknown"
+    labels: list[str] = []
+    for _, row in rows.iterrows():
+        label = target_label(row[MUSCLE_COLUMN], row.get(SIDE_COLUMN))
+        if label and label not in labels:
+            labels.append(label)
+    return ", ".join(labels) if labels else "Unknown"
+
+
 def _latest_non_missing_stimulated_cortex(rows: pd.DataFrame) -> str:
     if "Stimulated_cortex" not in rows.columns:
         return "Unknown"
@@ -264,9 +298,13 @@ def _build_visit_table_rows(visit_summary: pd.DataFrame) -> list[list[str]]:
 
 def _build_summary_figure(
     participant_label, participant_rows, visit_summary, visit_timeline,
-    anchor_date_text,
+    anchor_date_text, all_participant_rows=None,
 ):
     """Build the page-1 figure: demographics block + visit table.
+
+    *all_participant_rows* is the participant's rows before any
+    recording-target restriction, so the "Recorded muscle(s)" field names every
+    muscle even when the report's plots cover one of them.
 
     The letterhead banner is rendered above this figure by
     :func:`reports.pdf_layout.build_letterhead_banner_page`.  Fonts are
@@ -287,6 +325,9 @@ def _build_summary_figure(
     sex = _latest_non_missing_sex(participant_rows)
     subject_type = _latest_non_missing_subject_type(participant_rows)
     cortex = _latest_non_missing_stimulated_cortex(participant_rows)
+    target_rows = (
+        participant_rows if all_participant_rows is None else all_participant_rows
+    )
     visit_count = len(visit_timeline) if visit_timeline is not None else 0
 
     info_ax.text(
@@ -302,12 +343,14 @@ def _build_summary_figure(
         ("Age", age),
         ("Sex", sex),
         ("Stimulated Cortex", cortex),
+        ("Recorded muscle(s)", _recording_targets_text(target_rows)),
         ("Visit count", str(visit_count)),
         ("Comparison visit", anchor_date_text),
+        ("Date generated", generation_date_string()),
     ]
 
     top = 0.82
-    line_step = 0.095
+    line_step = 0.088
     label_x = 0.0
     value_x = 0.32
     for i, (label, value) in enumerate(field_rows):
@@ -412,7 +455,8 @@ def _build_summary_figure_no_dates(participant_label, participant_rows):
         f"Study: {study}   |   Patient ID: {participant_label}   |   "
         f"Patient type: {subject_type}\n"
         f"Age: {age}   |   Sex: {sex}   |   Stimulated Cortex: {cortex}\n"
-        f"Visit count: 0   |   Latest visit used for comparisons: No valid dates",
+        f"Visit count: 0   |   Latest visit used for comparisons: No valid dates\n"
+        f"Date generated: {generation_date_string()}",
         fontsize=10.5, color="#36495C", linespacing=1.5,
         ha="left", va="top", transform=ax.transAxes,
     )
@@ -532,10 +576,21 @@ def _format_number(value, fmt: str = "{:.2f}") -> str:
         return str(value)
 
 
+def _visit_subtitle(visit_date: str | None, target_label: str | None = None) -> str:
+    """Build the trailing ``" | 12/01/2026 | Right FDI"`` fragment of a title.
+
+    *target_label* is supplied only when the visit recorded more than one
+    muscle/side; with a single recording it stays empty and the muscle is
+    stated once on the report's title page instead.
+    """
+    return "".join(f" | {p}" for p in (visit_date, target_label) if p)
+
+
 def _build_cmap_table_figure(
     participant_label: str,
     cmap_rows: list[dict],
     visit_date: str | None,
+    target_label: str | None = None,
 ):
     """Render the CMAP table page for one participant visit."""
     import matplotlib.pyplot as plt
@@ -544,7 +599,7 @@ def _build_cmap_table_figure(
     ax = fig.add_subplot(111)
     ax.axis("off")
 
-    subtitle = f" | {visit_date}" if visit_date else ""
+    subtitle = _visit_subtitle(visit_date, target_label)
     ax.text(
         0.0, 0.98,
         f"{participant_label} | Motor nerve conduction study{subtitle}",
@@ -588,6 +643,7 @@ def _build_munix_table_figure(
     participant_label: str,
     munix_rows: list[dict],
     visit_date: str | None,
+    target_label: str | None = None,
 ):
     """Render the MUNIX table page for one participant visit.
 
@@ -599,7 +655,7 @@ def _build_munix_table_figure(
     ax = fig.add_subplot(111)
     ax.axis("off")
 
-    subtitle = f" | {visit_date}" if visit_date else ""
+    subtitle = _visit_subtitle(visit_date, target_label)
     ax.text(
         0.0, 0.97,
         f"{participant_label} | MUNIX{subtitle}",
@@ -655,6 +711,285 @@ def _build_munix_table_figure(
     return fig
 
 
+def _build_sr_figure(
+    participant_label: str,
+    sr_points: list[dict],
+    max_cmap_1ms: float | None,
+    visit_date: str | None,
+    target_label: str | None = None,
+):
+    """Render the stimulus-response recruitment scatter for one participant visit.
+
+    ``sr_points`` is the curve from :func:`parser.sr_parser.extract_sr_block`
+    (one dict per ``SR.n`` row with ``stimulus_mA`` and ``cmap_mV``).  The
+    x-axis is stimulus intensity (mA) and the y-axis is absolute CMAP size
+    (mV); the reference Max CMAP at 1 ms is annotated across the top of the
+    plot as requested.  The curve covers this participant only.
+    """
+    import matplotlib.pyplot as plt
+
+    xs = [
+        p["stimulus_mA"] for p in sr_points
+        if p.get("stimulus_mA") is not None and p.get("cmap_mV") is not None
+    ]
+    ys = [
+        p["cmap_mV"] for p in sr_points
+        if p.get("stimulus_mA") is not None and p.get("cmap_mV") is not None
+    ]
+
+    fig = plt.figure(figsize=(7.7, 5.2))
+    ax = fig.add_subplot(111)
+
+    ax.scatter(
+        xs, ys,
+        s=34, color="#2B6CB0", edgecolor="#1F2A36", linewidth=0.5,
+        alpha=0.9, zorder=3,
+    )
+
+    ax.set_xlabel("Stimulus intensity (mA)", fontsize=11, color="#1F2A36")
+    ax.set_ylabel("CMAP size (mV)", fontsize=11, color="#1F2A36")
+    ax.tick_params(labelsize=9, colors="#36495C")
+    ax.grid(True, color="#E2E8F0", linewidth=0.8, zorder=0)
+    for spine_name in ("top", "right"):
+        ax.spines[spine_name].set_visible(False)
+    for spine_name in ("left", "bottom"):
+        ax.spines[spine_name].set_color("#B7C2CF")
+    if ys:
+        ax.set_ylim(bottom=min(0.0, min(ys)))
+
+    subtitle = _visit_subtitle(visit_date, target_label)
+    ax.text(
+        0.5, 1.10, f"{participant_label} | Stimulus-Response{subtitle}",
+        transform=ax.transAxes, ha="center", va="bottom",
+        fontsize=13, fontweight="bold", color="#1F2A36",
+    )
+    max_text = (
+        f"Max CMAP at 1 ms = {max_cmap_1ms:.2f} mV"
+        if max_cmap_1ms is not None
+        else "Max CMAP at 1 ms = N/A"
+    )
+    ax.text(
+        0.5, 1.02, max_text,
+        transform=ax.transAxes, ha="center", va="bottom",
+        fontsize=11, fontweight="bold", color="#2B6CB0",
+    )
+
+    fig.subplots_adjust(top=0.85, bottom=0.11, left=0.10, right=0.96)
+    return fig
+
+
+def _sd_xy(sd_points: list[dict], y_key: str) -> tuple[list[float], list[float]]:
+    """Return parallel (duration, *y_key*) lists for the finite measured points."""
+    xs = [
+        p["duration_ms"] for p in sd_points
+        if p.get("duration_ms") is not None and p.get(y_key) is not None
+    ]
+    ys = [
+        p[y_key] for p in sd_points
+        if p.get("duration_ms") is not None and p.get(y_key) is not None
+    ]
+    return xs, ys
+
+
+def _sd_title(
+    ax, participant_label: str, name: str, visit_date: str | None,
+    target_label: str | None = None,
+):
+    """Draw the shared bold title used by both strength-duration figures."""
+    subtitle = _visit_subtitle(visit_date, target_label)
+    ax.text(
+        0.5, 1.10, f"{participant_label} | {name}{subtitle}",
+        transform=ax.transAxes, ha="center", va="bottom",
+        fontsize=13, fontweight="bold", color="#1F2A36",
+    )
+
+
+def _build_strength_duration_curve_figure(
+    participant_label: str,
+    sd_points: list[dict],
+    rheobase_mA: float | None,
+    tau_sd_ms: float | None,
+    visit_date: str | None,
+    target_label: str | None = None,
+):
+    """Render the strength-duration curve for one participant visit.
+
+    ``sd_points`` is the list from
+    :func:`parser.strength_duration_parser.extract_sd_block` (one dict per
+    ``QT.n`` row with ``duration_ms`` and ``threshold_mA``).  The x-axis is
+    stimulus duration (ms) and the y-axis is threshold current (mA); a fitted
+    hyperbola ``I = rheobase*(1 + tau/d)`` is drawn through the points using the
+    QtracP-derived rheobase and tau (not refitted), with the rheobase asymptote
+    and tau annotated.  The curve covers this participant only.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    xs, ys = _sd_xy(sd_points, "threshold_mA")
+
+    fig = plt.figure(figsize=(7.7, 5.2))
+    ax = fig.add_subplot(111)
+
+    ax.scatter(
+        xs, ys,
+        s=34, color="#2B6CB0", edgecolor="#1F2A36", linewidth=0.5,
+        alpha=0.9, zorder=3, label="Measured",
+    )
+
+    if rheobase_mA is not None and tau_sd_ms is not None and xs:
+        d_max = max(xs)
+        # Sample the hyperbola from a small positive duration (avoid the d=0
+        # singularity) out to just past the widest measured pulse width.
+        d_lo = max(min(xs) * 0.5, 1e-3)
+        d_fit = np.linspace(d_lo, d_max * 1.05, 240)
+        i_fit = rheobase_mA * (1.0 + tau_sd_ms / d_fit)
+        ax.plot(
+            d_fit, i_fit,
+            color="#C05621", linewidth=1.8, zorder=2,
+            label="Fit: I = rheobase·(1 + τSD/d)",
+        )
+        # Rheobase asymptote (the current the curve approaches as d -> inf).
+        ax.axhline(
+            rheobase_mA, color="#718096", linestyle="--", linewidth=1.0, zorder=1,
+        )
+        ax.text(
+            0.99, rheobase_mA, f" rheobase = {rheobase_mA:.2f} mA",
+            transform=ax.get_yaxis_transform(), va="bottom", ha="right",
+            fontsize=9, color="#4A5568",
+        )
+        # Mark tau on the x-axis where the curve reaches 2 x rheobase
+        # (I = rheobase*(1 + tau/tau) = 2*rheobase), if tau is in range.
+        if d_lo <= tau_sd_ms <= d_max * 1.05:
+            ax.plot(
+                [tau_sd_ms], [2.0 * rheobase_mA],
+                marker="o", markersize=5, markerfacecolor="none",
+                markeredgecolor="#C05621", zorder=4,
+            )
+            ax.annotate(
+                f"τSD = {tau_sd_ms:.2f} ms",
+                xy=(tau_sd_ms, 2.0 * rheobase_mA),
+                xytext=(12, 10), textcoords="offset points",
+                fontsize=9, color="#C05621",
+                arrowprops=dict(arrowstyle="->", color="#C05621", linewidth=0.8),
+            )
+        ax.legend(loc="upper right", fontsize=9, frameon=False)
+
+    ax.set_xlabel("Stimulus duration (ms)", fontsize=11, color="#1F2A36")
+    ax.set_ylabel("Threshold current (mA)", fontsize=11, color="#1F2A36")
+    ax.tick_params(labelsize=9, colors="#36495C")
+    ax.grid(True, color="#E2E8F0", linewidth=0.8, zorder=0)
+    for spine_name in ("top", "right"):
+        ax.spines[spine_name].set_visible(False)
+    for spine_name in ("left", "bottom"):
+        ax.spines[spine_name].set_color("#B7C2CF")
+    if ys:
+        ax.set_ylim(bottom=0.0)
+
+    _sd_title(
+        ax, participant_label, "Strength-Duration Curve", visit_date, target_label,
+    )
+    scalars_text = (
+        f"Rheobase = {rheobase_mA:.2f} mA   |   τSD = {tau_sd_ms:.2f} ms"
+        if rheobase_mA is not None and tau_sd_ms is not None
+        else "Rheobase / τSD = N/A"
+    )
+    ax.text(
+        0.5, 1.02, scalars_text,
+        transform=ax.transAxes, ha="center", va="bottom",
+        fontsize=11, fontweight="bold", color="#2B6CB0",
+    )
+
+    fig.subplots_adjust(top=0.85, bottom=0.11, left=0.10, right=0.96)
+    return fig
+
+
+def _build_charge_duration_figure(
+    participant_label: str,
+    sd_points: list[dict],
+    rheobase_mA: float | None,
+    tau_sd_ms: float | None,
+    r_squared: float | None,
+    visit_date: str | None,
+    target_label: str | None = None,
+):
+    """Render the charge-duration (Weiss linearization) plot for one visit.
+
+    The x-axis is stimulus duration (ms) and the y-axis is threshold charge
+    (mA*ms).  A straight line ``Q = rheobase*(d + tau)`` is drawn from the
+    QtracP-derived rheobase and tau (slope = rheobase, x-intercept = -tau); the
+    slope, x-intercept and fit R^2 are annotated.  Covers this participant only.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    xs, ys = _sd_xy(sd_points, "charge_mA_ms")
+
+    fig = plt.figure(figsize=(7.7, 5.2))
+    ax = fig.add_subplot(111)
+
+    ax.scatter(
+        xs, ys,
+        s=34, color="#2B6CB0", edgecolor="#1F2A36", linewidth=0.5,
+        alpha=0.9, zorder=3, label="Measured",
+    )
+
+    if rheobase_mA is not None and tau_sd_ms is not None and xs:
+        x_int = -tau_sd_ms  # Weiss line crosses Q = 0 at d = -tau.
+        d_max = max(xs)
+        # Draw the line from its x-intercept through the measured range so the
+        # slope = rheobase and x-intercept = -tau are both visible.
+        d_line = np.linspace(x_int, d_max * 1.05, 240)
+        q_line = rheobase_mA * (d_line + tau_sd_ms)
+        ax.plot(
+            d_line, q_line,
+            color="#C05621", linewidth=1.8, zorder=2,
+            label="Fit: Q = rheobase·(d + τSD)",
+        )
+        # Reference axes through the origin so the x-intercept reads cleanly.
+        ax.axhline(0.0, color="#CBD5E0", linewidth=0.8, zorder=1)
+        ax.axvline(0.0, color="#CBD5E0", linewidth=0.8, zorder=1)
+        # Mark the x-intercept (-tau, 0).
+        ax.plot(
+            [x_int], [0.0],
+            marker="o", markersize=5, markerfacecolor="none",
+            markeredgecolor="#C05621", zorder=4,
+        )
+        ax.annotate(
+            f"x-intercept = −τSD = {x_int:.2f} ms",
+            xy=(x_int, 0.0),
+            xytext=(10, -16), textcoords="offset points",
+            fontsize=9, color="#C05621",
+            arrowprops=dict(arrowstyle="->", color="#C05621", linewidth=0.8),
+        )
+        ax.legend(loc="upper left", fontsize=9, frameon=False)
+
+    ax.set_xlabel("Stimulus duration (ms)", fontsize=11, color="#1F2A36")
+    ax.set_ylabel("Threshold charge (mA·ms)", fontsize=11, color="#1F2A36")
+    ax.tick_params(labelsize=9, colors="#36495C")
+    ax.grid(True, color="#E2E8F0", linewidth=0.8, zorder=0)
+    for spine_name in ("top", "right"):
+        ax.spines[spine_name].set_visible(False)
+    for spine_name in ("left", "bottom"):
+        ax.spines[spine_name].set_color("#B7C2CF")
+
+    _sd_title(
+        ax, participant_label, "Charge-Duration (Weiss)", visit_date, target_label,
+    )
+    r2_text = f"R² = {r_squared:.3f}" if r_squared is not None else "R² = N/A"
+    slope_text = (
+        f"Slope (rheobase) = {rheobase_mA:.2f} mA"
+        if rheobase_mA is not None else "Slope = N/A"
+    )
+    ax.text(
+        0.5, 1.02, f"{slope_text}   |   {r2_text}",
+        transform=ax.transAxes, ha="center", va="bottom",
+        fontsize=11, fontweight="bold", color="#2B6CB0",
+    )
+
+    fig.subplots_adjust(top=0.85, bottom=0.11, left=0.10, right=0.96)
+    return fig
+
+
 def build_header_only_figure(
     participant_rows: pd.DataFrame,
     participant_label: str | None = None,
@@ -662,7 +997,7 @@ def build_header_only_figure(
     """Build a standalone patient-info figure for the letterhead page.
 
     Fields displayed (in order): Study, Patient ID, Patient type, Age, Sex,
-    Stimulated Cortex.
+    Stimulated Cortex, Recorded muscle(s).
 
     This is used by the GUI workflow — it is placed on page 1 beneath the
     institutional letterhead banner.  The figure is sized for portrait
@@ -698,6 +1033,8 @@ def build_header_only_figure(
         ("Age", age),
         ("Sex", sex),
         ("Stimulated Cortex", cortex),
+        ("Recorded muscle(s)", _recording_targets_text(participant_rows)),
+        ("Date generated", generation_date_string()),
     ]
 
     top = 0.82
@@ -821,6 +1158,153 @@ def _csp_group_or_message(
 
 
 # ---------------------------------------------------------------------------
+# Strength-duration data loader (headless / CLI path)
+# ---------------------------------------------------------------------------
+
+def _first_json_list_df(rows: pd.DataFrame, column: str) -> list[dict]:
+    """Return the first non-empty JSON list stored in *column*, or ``[]``."""
+    import json
+
+    if column not in rows.columns:
+        return []
+    for raw in rows[column].tolist():
+        if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+            continue
+        text = str(raw).strip()
+        if not text or text.lower() == "nan" or text == "[]":
+            continue
+        try:
+            parsed = json.loads(text)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(parsed, list) and parsed:
+            return [p for p in parsed if isinstance(p, dict)]
+    return []
+
+
+def _load_sd_for_visit(
+    participant_rows: pd.DataFrame,
+    visit_date: str | None,
+    mem_dir=None,
+) -> tuple[list[dict], float | None, float | None]:
+    """Load the charge-duration points for a visit (headless/CLI report path).
+
+    Prefers the points persisted in the DataFrame/CSV (``SD_points``) so the
+    report can be built from an archived CSV alone. Falls back to re-parsing the
+    source .MEM (older archives that predate the stored column); when *mem_dir*
+    is ``None`` the configured ``core.config.MEM_DIR`` is used. Derived scalars
+    prefer the DataFrame's stored ``Rheobase_mA`` / ``Tau_SD_ms`` values.
+    Returns ``([], None, None)`` when nothing is found.
+    """
+    from parser.strength_duration_parser import (
+        SD_POINTS_COLUMN,
+        SD_RHEOBASE_COLUMN,
+        SD_TAU_COLUMN,
+        parse_strength_duration_file,
+    )
+
+    rows = participant_rows
+    if visit_date is not None and "Date" in rows.columns:
+        rows = rows[
+            rows["Date"].astype("string").fillna("").str.strip() == visit_date
+        ]
+    if rows.empty:
+        return [], None, None
+
+    def _stored_scalar(col):
+        if col in rows.columns:
+            s = pd.to_numeric(rows[col], errors="coerce").dropna()
+            if not s.empty:
+                return float(s.iloc[0])
+        return None
+
+    rheobase = _stored_scalar(SD_RHEOBASE_COLUMN)
+    tau = _stored_scalar(SD_TAU_COLUMN)
+
+    # 1) Stored points column — no source .MEM needed (works from an archived CSV).
+    points = _first_json_list_df(rows, SD_POINTS_COLUMN)
+    if points:
+        return points, rheobase, tau
+
+    # 2) Fall back to re-reading the source .MEM.
+    from parser.mem_parser import iter_mem_files
+    from core.config import MEM_DIR
+
+    if "source_file" not in rows.columns:
+        return [], rheobase, tau
+    names: list[str] = []
+    for value in rows["source_file"].tolist():
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            continue
+        names.extend(n.strip() for n in str(value).split(";") if n.strip())
+    if not names:
+        return [], rheobase, tau
+
+    search_dir = mem_dir if mem_dir is not None else (
+        str(MEM_DIR) if MEM_DIR.is_dir() else None
+    )
+    if search_dir is None:
+        return [], rheobase, tau
+
+    file_index = {p.name: p for p in iter_mem_files(search_dir, recursive=True)}
+    for name in names:
+        path = file_index.get(name)
+        if path is None:
+            continue
+        try:
+            block = parse_strength_duration_file(path)
+        except OSError:
+            continue
+        if block.get("points"):
+            return (
+                block["points"],
+                rheobase if rheobase is not None else block.get("rheobase_mA"),
+                tau if tau is not None else block.get("tau_sd_ms"),
+            )
+    return [], rheobase, tau
+
+
+def _strength_duration_curve_section(
+    plabel, p_rows, anchor, mem_dir, target_label_text=None,
+) -> list:
+    """Build the strength-duration curve ReportItem for the CLI report path."""
+    points, rheobase, tau = _load_sd_for_visit(p_rows, anchor, mem_dir)
+    if not points or rheobase is None or tau is None:
+        return []
+    fig = _build_strength_duration_curve_figure(
+        plabel, points, rheobase, tau, anchor, target_label_text,
+    )
+    caption = caption_for("strength_duration_curve", None, {
+        "rheobase_mA": rheobase, "tau_sd_ms": tau, "sd_point_count": len(points),
+    })
+    return [ReportItem(
+        figure=fig, caption=caption, section_key="strength_duration_curve",
+    )]
+
+
+def _charge_duration_weiss_section(
+    plabel, p_rows, anchor, mem_dir, target_label_text=None,
+) -> list:
+    """Build the charge-duration (Weiss) ReportItem for the CLI report path."""
+    from parser.strength_duration_parser import charge_duration_r_squared
+
+    points, rheobase, tau = _load_sd_for_visit(p_rows, anchor, mem_dir)
+    if not points or rheobase is None or tau is None:
+        return []
+    r2 = charge_duration_r_squared(points, rheobase, tau)
+    fig = _build_charge_duration_figure(
+        plabel, points, rheobase, tau, r2, anchor, target_label_text,
+    )
+    caption = caption_for("charge_duration_weiss", None, {
+        "rheobase_mA": rheobase, "tau_sd_ms": tau, "r_squared": r2,
+        "sd_point_count": len(points),
+    })
+    return [ReportItem(
+        figure=fig, caption=caption, section_key="charge_duration_weiss",
+    )]
+
+
+# ---------------------------------------------------------------------------
 # Main figure builder
 # ---------------------------------------------------------------------------
 
@@ -831,6 +1315,8 @@ def build_report_figures(
     age_window: int = 5,
     show: bool = False,
     mem_date: str | None = None,
+    mem_dir=None,
+    recording_target: str | None = None,
 ) -> list:
     """Generate all requested report figures for one participant.
 
@@ -850,6 +1336,11 @@ def build_report_figures(
         Visit date to use as the anchor for group comparisons (any format
         accepted by ``normalize_mem_date``).  When ``None`` or when the date
         has no data for this participant, the most recent visit is used.
+    recording_target : str, optional
+        Restrict this participant's rows to one recording target (e.g.
+        ``"Right FDI"``) and name it in the figure titles.  ``None`` uses every
+        row the participant has, which is right for a visit recorded from a
+        single muscle.  Reference cohorts stay pooled either way.
 
     Returns
     -------
@@ -864,6 +1355,18 @@ def build_report_figures(
 
     resolved_df = load_mem_dataframe(data_df=data_df)
     p_rows, _, resolved_id = resolve_participant_context(resolved_df, participant_id=participant_id)
+
+    # The title page names every muscle the participant was recorded from, even
+    # when the plots below are restricted to one of them, so keep an unfiltered
+    # copy before narrowing.
+    all_participant_rows = p_rows.copy()
+    if recording_target:
+        resolved_df = restrict_participant_to_target(
+            resolved_df, resolved_id, recording_target,
+        )
+        p_rows, _, resolved_id = resolve_participant_context(
+            resolved_df, participant_id=participant_id,
+        )
 
     p_rows = p_rows.copy()
     p_rows["visit_date"] = pd.to_datetime(p_rows["Date"], dayfirst=True, errors="coerce")
@@ -892,6 +1395,10 @@ def build_report_figures(
     else:
         anchor = None
     plabel = format_participant_label(resolved_id)
+    if recording_target:
+        # Every title in this path is built as "<plabel> | ...", so naming the
+        # recording here puts it on all of them at once.
+        plabel = f"{plabel} ({recording_target})"
     skip_missing = requests_all_report_sections(included_sections)
     section_keys = normalize_report_sections(included_sections)
 
@@ -966,9 +1473,11 @@ def build_report_figures(
     builders: dict = {
         "summary": lambda: _simple_item(
             "summary",
-            _build_summary_figure(plabel, p_rows, visit_sum, visit_tl, anchor)
+            _build_summary_figure(
+                plabel, p_rows, visit_sum, visit_tl, anchor, all_participant_rows,
+            )
             if has_valid_dates
-            else _build_summary_figure_no_dates(plabel, p_rows),
+            else _build_summary_figure_no_dates(plabel, all_participant_rows),
         ),
         # 'visit_table' now renders the visit timeline only — the visit
         # summary table itself moved onto page 1 alongside the demographics.
@@ -988,6 +1497,7 @@ def build_report_figures(
                     plabel,
                     _extract_cmap_rows_for_visit(p_rows, anchor),
                     anchor,
+                    recording_target,
                 ),
             )
             if _extract_cmap_rows_for_visit(p_rows, anchor)
@@ -1000,10 +1510,17 @@ def build_report_figures(
                     plabel,
                     _extract_munix_rows_for_visit(p_rows, anchor),
                     anchor,
+                    recording_target,
                 ),
             )
             if _extract_munix_rows_for_visit(p_rows, anchor)
             else []
+        ),
+        "strength_duration_curve": lambda: _strength_duration_curve_section(
+            plabel, p_rows, anchor, mem_dir, recording_target,
+        ),
+        "charge_duration_weiss": lambda: _charge_duration_weiss_section(
+            plabel, p_rows, anchor, mem_dir, recording_target,
         ),
         "rmt_over_time": lambda: _single_fig_or_msg(
             "rmt_over_time",
@@ -1082,6 +1599,18 @@ def build_report_figures(
         ),
     }
 
+    # T-SICI cohort trajectory (repeated-visit participants only). Uses the
+    # cohort of the same subject type; gated out above when < 2 visits.
+    builders["t_sici_trajectory"] = lambda: _single_fig_or_msg(
+        "t_sici_trajectory",
+        f"{plabel} | T-SICI trajectory vs cohort",
+        lambda: plot_participant_measure_trajectory(
+            measure="t_sici", participant_id=resolved_id, data_df=resolved_df,
+            title=f"{plabel} | T-SICI trajectory vs cohort", show=show,
+        ),
+        caption_fn=lambda pd_, k: caption_for("trajectory", "t_sici", pd_, k),
+    )
+
     # Waveform measures (T-SICI, A-SICI, A-SICF, T-SICF)
     for m in WAVEFORM_REPORT_MEASURES:
         ml = waveform_measure_config(m)["label"]
@@ -1141,5 +1670,11 @@ def build_report_figures(
         out = builders[key]()
         if out:
             items.extend(out)
+
+    # Enlarge the axis text on plot figures so the exported report matches the
+    # in-app previews. Tables and the letterhead summary keep their tuned layout.
+    for item in items:
+        if item.figure is not None and item.section_key not in _SKIP_FONT_ENLARGE:
+            enlarge_axes_fonts(item.figure)
 
     return items

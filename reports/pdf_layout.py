@@ -20,6 +20,7 @@ from __future__ import annotations
 import io
 import sys
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,45 @@ import numpy as np
 PAGE_SIZE = (8.5, 11.0)          # portrait US Letter, inches
 PAGE_MARGIN = 0.4                 # uniform inch margin on all sides
 LETTERHEAD_HEIGHT = 2.1           # inches reserved for letterhead banner on page 1
+
+# Footer stamped on every page (see :func:`stamp_page_footer`).
+_FOOTER_Y_INCHES = 0.22           # baseline height above the page bottom edge
+_FOOTER_FONTSIZE = 8.0
+_FOOTER_COLOR = "#5A6B7C"
+
+
+def generation_date_string(when: datetime | None = None) -> str:
+    """Return the report generation date as ``dd/mm/YYYY`` (today by default)."""
+    return (when or datetime.now()).strftime("%d/%m/%Y")
+
+
+def stamp_page_footer(
+    page_fig,
+    page_number: int,
+    total_pages: int,
+    date_generated: str,
+):
+    """Stamp a page's footer: date generated (left) + page N of M (right).
+
+    Text is drawn in figure coordinates inside the bottom margin so it never
+    overlaps the composed content above. Applied to *every* page, including the
+    letterhead cover page.
+    """
+    y = _FOOTER_Y_INCHES / PAGE_SIZE[1]
+    left_x = PAGE_MARGIN / PAGE_SIZE[0]
+    right_x = 1.0 - (PAGE_MARGIN / PAGE_SIZE[0])
+
+    page_fig.text(
+        left_x, y, f"Date generated: {date_generated}",
+        ha="left", va="center",
+        fontsize=_FOOTER_FONTSIZE, color=_FOOTER_COLOR,
+    )
+    page_fig.text(
+        right_x, y, f"Page {page_number} of {total_pages}",
+        ha="right", va="center",
+        fontsize=_FOOTER_FONTSIZE, color=_FOOTER_COLOR,
+    )
+    return page_fig
 
 
 def _resolve_icons_dir() -> Path:

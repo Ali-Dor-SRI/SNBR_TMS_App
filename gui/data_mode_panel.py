@@ -19,6 +19,28 @@ MODE_PARSE_MEM = 2
 MODE_EXISTING_CSV_FAST = 3
 
 
+def _missing_folder_warnings(attrs: dict) -> list[str]:
+    """Warnings for data a target rebuild could not regenerate this run.
+
+    Re-parsing rebuilds CSP/CMAP values only from the folders selected for the
+    current run, so an archive that carried them while the folder is now
+    unselected comes back thinner. Say so rather than let it pass silently.
+    """
+    warnings: list[str] = []
+    if attrs.get("target_rebuild_lost_csp"):
+        warnings.append(
+            "No CSP folder was selected, so CSP values from the archive are not "
+            "in this DataFrame — select the CSP folder and re-run to restore them."
+        )
+    if attrs.get("target_rebuild_lost_cmap"):
+        warnings.append(
+            "No CMAP folder was selected, so CMAP/MUNIX tables from the archive "
+            "are not in this DataFrame — select the CMAP folder and re-run to "
+            "restore them."
+        )
+    return warnings
+
+
 class DataModePanel(ctk.CTkFrame):
     """Data-import mode selection — page 2 of the workflow."""
 
@@ -78,10 +100,10 @@ class DataModePanel(ctk.CTkFrame):
         )
         self._fast_desc.grid(row=1, column=0, sticky="w", padx=(26, 0), pady=(0, SECTION_PAD_Y))
 
-        # Option 2 — existing CSV, also checking for newly added MEM files
+        # Option 2 — existing CSV, plus fold in any newly recorded visits
         self._radio_csv = ctk.CTkRadioButton(
             options,
-            text="Create report from existing data frame (check for new MEM files)",
+            text="Update existing data frame with new visits (MEM + CSP)",
             variable=self._mode_var,
             value=MODE_EXISTING_CSV,
             font=FONT_HEADING,
@@ -90,7 +112,7 @@ class DataModePanel(ctk.CTkFrame):
 
         self._csv_desc = ctk.CTkLabel(
             options,
-            text="Load the archive .csv, then scan the MEM folder for newly added .MEM files (no parsing).",
+            text="Load the archive .csv, then scan the MEM and CSP folders and merge in any newly recorded visits (including CSP-only follow-ups).",
             font=FONT_SUBTITLE,
             text_color=SUBTITLE_COLOR,
             anchor="w",
@@ -184,8 +206,9 @@ class DataModePanel(ctk.CTkFrame):
             self._radio_csv.configure(state="normal")
             self._csv_desc.configure(
                 text=(
-                    "Load the archive .csv, then scan the MEM folder for newly "
-                    f"added .MEM files (no parsing).\n({csv_path})"
+                    "Load the archive .csv, then scan the MEM and CSP folders "
+                    "and merge in any newly recorded visits (including "
+                    f"CSP-only follow-ups).\n({csv_path})"
                 ),
             )
             # Default to the fast path when an archive is available.
@@ -236,9 +259,15 @@ class DataModePanel(ctk.CTkFrame):
                 df = self._controller.load_csv_dataframe(merge_cmap=False)
                 self.after(0, self._on_fast_success, df)
             elif mode == MODE_EXISTING_CSV:
-                df = self._controller.load_csv_dataframe()
-                new_count = self._controller.count_new_mem_files(df)
-                self.after(0, self._on_import_success, df, new_count)
+                # Load the existing archive and fold in any newly recorded
+                # visits — new .MEM files *and* new CSP-only follow-ups — so a
+                # returning participant's latest session is reportable without
+                # forcing a full re-parse of everything.
+                df = self._controller.parse_and_build()
+                attrs = getattr(df, "attrs", {})
+                new_mem = attrs.get("new_files_parsed", 0)
+                new_csp = attrs.get("new_csp_files_merged", 0)
+                self.after(0, self._on_import_success, df, new_mem, new_csp)
             else:
                 df = self._controller.parse_and_build()
                 attrs = getattr(df, "attrs", {})
@@ -253,26 +282,86 @@ class DataModePanel(ctk.CTkFrame):
         self._set_busy(False)
         self._status_var.set(f"Loaded {len(df)} rows from archive CSV.")
         self._status_label.configure(text_color=SUCCESS_COLOR)
+        attrs = getattr(df, "attrs", {})
+        if attrs.get("targets_stale"):
+            self._info_var.set(
+                "Note: this archive predates per-muscle recording targets, so "
+                "visits recorded from more than one muscle are still merged into "
+                "a single row. Use 'Update existing data frame' or a full parse "
+                "to split them."
+            )
+        elif attrs.get("schema_stale"):
+            self._info_var.set(
+                "Note: this archive predates newer measures (e.g. SR/SD), so "
+                "those graphs will be unavailable. Use 'Update existing data "
+                "frame' or a full parse to populate them."
+            )
         self._on_next()
 
-    def _on_import_success(self, df, new_count: int):
-        """Callback on the main thread after CSV load completes."""
+    def _on_import_success(self, df, new_mem: int, new_csp: int):
+        """Callback on the main thread after the archive + new-file merge."""
         self._set_busy(False)
         rows = len(df)
-        self._status_var.set(f"Loaded {rows} rows from CSV.")
+        self._status_var.set(f"Data ready — {rows} rows.")
         self._status_label.configure(text_color=SUCCESS_COLOR)
 
-        if new_count > 0:
+        attrs = getattr(df, "attrs", {})
+        if attrs.get("target_rebuild"):
             self._info_var.set(
-                f"{new_count} new .MEM file(s) found that are not in this CSV."
+                " ".join(
+                    ["Archive predated per-muscle recording targets — re-parsed "
+                     "every .MEM file so visits recorded from more than one "
+                     "muscle are split into one row each. Export the archive to "
+                     "keep future loads fast."]
+                    + _missing_folder_warnings(attrs)
+                )
             )
+            self._on_next()
+            return
+
+        if attrs.get("schema_rebuilt"):
+            self._info_var.set(
+                "Archive was out of date — re-parsed all visits to add newer "
+                "fields (e.g. SR/SD). Export the archive to keep future loads fast."
+            )
+            self._on_next()
+            return
+
+        parts = []
+        if new_mem:
+            parts.append(f"{new_mem} new .MEM file(s)")
+        if new_csp:
+            parts.append(f"{new_csp} new CSP file(s)")
+        if parts:
+            self._info_var.set(
+                f"Added {' and '.join(parts)} not previously in the archive."
+            )
+        else:
+            self._info_var.set("No new files found — archive already up to date.")
         self._on_next()
 
     def _on_parse_success(self, df, new_parsed):
         """Callback on the main thread after MEM parsing completes."""
         self._set_busy(False)
         rows = len(df)
-        self._status_var.set(f"DataFrame ready — {rows} rows ({new_parsed} new files parsed).")
+        attrs = getattr(df, "attrs", {})
+        if attrs.get("target_rebuild"):
+            self._status_var.set(
+                f"Archive predated per-muscle recording targets — re-parsed every "
+                f".MEM file into {rows} rows, one per visit and muscle. Export the "
+                "archive on the Export page to keep future loads fast."
+            )
+            self._info_var.set(" ".join(_missing_folder_warnings(attrs)))
+        elif attrs.get("schema_rebuilt"):
+            self._status_var.set(
+                f"Archive was out of date — re-parsed all {rows} rows to add "
+                "newer fields (e.g. SR/SD). Export the archive on the Export "
+                "page to keep future loads fast."
+            )
+        else:
+            self._status_var.set(
+                f"DataFrame ready — {rows} rows ({new_parsed} new files parsed)."
+            )
         self._status_label.configure(text_color=SUCCESS_COLOR)
         self._on_next()
 

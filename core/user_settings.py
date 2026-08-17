@@ -63,6 +63,17 @@ KEY_EXCLUDED_MEASUREMENTS = "excluded_measurements"
 # Legacy whole-participant exclusion list (kept for one-way migration into
 # KEY_EXCLUDED_MEASUREMENTS). Stored as a list of integers.
 KEY_EXCLUDED_PARTICIPANTS = "excluded_participants"
+# Cohort-wide outlier cutoffs per measure. Any participant-visit whose average
+# for a measure falls outside the [lower, upper] range is excluded from the
+# cohort averages (and blanked in the exported CSV), cohort-wide. Stored as a
+# mapping of measure key -> {"lower": float|None, "upper": float|None}, e.g.
+# {"rmt": {"lower": 30, "upper": 90}, "t_sici": {"lower": null, "upper": 2.5}}.
+KEY_OUTLIER_BOUNDS = "outlier_bounds"
+# Optional workflow pages the user has chosen to skip in the linear Next/Back
+# flow ("Skip this page in future runs"). Stored as a list of page-name
+# strings, e.g. ["exclusion"]. Skipped pages stay reachable from the toolbar
+# page-jump dropdown.
+KEY_SKIPPED_PAGES = "skipped_pages"
 KEY_REDCAP_DATA_DIR = "redcap_data_dir"
 KEY_REDCAP_DICT_DIR = "redcap_dict_dir"
 KEY_REDCAP_TEMPLATE_DIR = "redcap_template_dir"
@@ -122,6 +133,8 @@ def load_defaults() -> dict[str, str]:
         KEY_SYNC_PAIRS: raw.get(KEY_SYNC_PAIRS, []),
         KEY_EXCLUDED_MEASUREMENTS: raw.get(KEY_EXCLUDED_MEASUREMENTS, {}),
         KEY_EXCLUDED_PARTICIPANTS: raw.get(KEY_EXCLUDED_PARTICIPANTS, []),
+        KEY_OUTLIER_BOUNDS: raw.get(KEY_OUTLIER_BOUNDS, {}),
+        KEY_SKIPPED_PAGES: raw.get(KEY_SKIPPED_PAGES, []),
         KEY_REDCAP_DATA_DIR: raw.get(KEY_REDCAP_DATA_DIR, ""),
         KEY_REDCAP_DICT_DIR: raw.get(KEY_REDCAP_DICT_DIR, ""),
         KEY_REDCAP_TEMPLATE_DIR: raw.get(KEY_REDCAP_TEMPLATE_DIR, ""),

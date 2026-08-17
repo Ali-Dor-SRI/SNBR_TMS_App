@@ -61,6 +61,7 @@ from processing._v1_visualization import (  # noqa: F401
     plot_measure_grouped_graph,
     plot_participant_measure_over_time,
     plot_participant_measure_visit_profiles,
+    plot_participant_measure_trajectory,
     # Plot functions — CSP
     plot_csp_profile,
     plot_csp_grouped_graph,
@@ -110,6 +111,7 @@ __all__ = [
     "plot_measure_grouped_graph",
     "plot_participant_measure_over_time",
     "plot_participant_measure_visit_profiles",
+    "plot_participant_measure_trajectory",
     "plot_csp_profile",
     "plot_csp_grouped_graph",
     "plot_participant_csp_over_time",

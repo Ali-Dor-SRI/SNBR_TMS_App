@@ -50,6 +50,15 @@ from parser.CSP_parser import (
     csp_output_columns,
     parse_csp_directory,
 )
+from parser.recording_target import (
+    MUSCLE_COLUMN,
+    SIDE_COLUMN,
+    is_hand_muscle,
+    target_key,
+    target_label,
+)
+from parser.sr_parser import SR_MAX_COLUMN
+from parser.strength_duration_parser import SD_RHEOBASE_COLUMN, SD_TAU_COLUMN
 from parser.cmap_parser import (
     cmap_output_columns,
     parse_cmap_directory,
@@ -67,6 +76,8 @@ NUMERIC_OUTPUT_COLUMNS = (
     + [f"A_SICF_{isi}" for isi in ASICF_ISIS]
     + list(CSP_VALUE_COLUMNS)
     + ["T_SICI_avg", "T_SICF_avg", "A_SICI_avg", "A_SICF_avg"]
+    + [SR_MAX_COLUMN]
+    + [SD_RHEOBASE_COLUMN, SD_TAU_COLUMN]
 )
 
 CSP_NUMERIC_COLUMNS = (
@@ -79,6 +90,12 @@ ACQUISITION_TOKEN_PATTERN = re.compile(
 )
 
 SOURCE_FILE_SEPARATOR = "; "
+
+
+def _has_any_value(df: pd.DataFrame, columns: list[str]) -> bool:
+    """Whether *df* holds at least one non-null value across *columns*."""
+    present = [c for c in columns if c in df.columns]
+    return bool(present) and bool(df[present].notna().any().any())
 
 
 def _split_source_files(value) -> list[str]:
@@ -241,9 +258,12 @@ def merge_csp_into_mem(
 ) -> pd.DataFrame:
     """Merge CSP rows into a MEM DataFrame using conservative matching.
 
-    Matching strategy (two passes):
+    Matching strategy (three passes):
     1. Exact match on (ID, Date, acquisition-token).
-    2. Fallback match on (ID, Date) for remaining unmatched rows.
+    2. Recording-target match on (ID, Date, muscle, side) — a visit that
+       recorded two muscles usually has one CSP file per muscle, and without
+       this pass neither could match 1-to-1 on (ID, Date) alone.
+    3. Fallback match on (ID, Date) for remaining unmatched rows.
     Only 1-to-1 matches are accepted in each pass.
 
     CSP values are written into matched MEM rows. Unmatched CSP rows are
@@ -287,23 +307,27 @@ def merge_csp_into_mem(
             matched_main.add(mi[0])
             matched_csp.add(ci[0])
 
-    # Pass 2: fallback (ID, Date) for remaining rows
-    fb_main = _match_key_maps(
-        main_work,
+    # Passes 2 and 3: recording target, then a bare (ID, Date) fallback.
+    for key_columns in (
+        ["_match_id", "_match_date", MUSCLE_COLUMN, SIDE_COLUMN],
         ["_match_id", "_match_date"],
-        allowed_indices={i for i in main_work.index if i not in matched_main},
-    )
-    fb_csp = _match_key_maps(
-        csp_work,
-        ["_match_id", "_match_date"],
-        allowed_indices={i for i in csp_work.index if i not in matched_csp},
-    )
-    for key in sorted(set(fb_main) & set(fb_csp)):
-        mi, ci = fb_main[key], fb_csp[key]
-        if len(mi) == 1 and len(ci) == 1:
-            matched_pairs.append((mi[0], ci[0]))
-            matched_main.add(mi[0])
-            matched_csp.add(ci[0])
+    ):
+        fb_main = _match_key_maps(
+            main_work,
+            key_columns,
+            allowed_indices={i for i in main_work.index if i not in matched_main},
+        )
+        fb_csp = _match_key_maps(
+            csp_work,
+            key_columns,
+            allowed_indices={i for i in csp_work.index if i not in matched_csp},
+        )
+        for key in sorted(set(fb_main) & set(fb_csp)):
+            mi, ci = fb_main[key], fb_csp[key]
+            if len(mi) == 1 and len(ci) == 1:
+                matched_pairs.append((mi[0], ci[0]))
+                matched_main.add(mi[0])
+                matched_csp.add(ci[0])
 
     # Write CSP values into matched MEM rows
     for m_idx, c_idx in matched_pairs:
@@ -445,15 +469,136 @@ def _apply_cmap_merge(
 # Same-session row coalescing
 # ---------------------------------------------------------------------------
 
+def resolve_visit_targets(group: pd.DataFrame) -> dict:
+    """Map each row index of a one-visit *group* to its recording-target key.
+
+    A visit's .MEM files split into targets by (muscle, recorded side), but
+    both header fields are frequently absent, so raw keys would fragment
+    visits that are really one recording.  Two absorption rules keep that from
+    happening:
+
+    * **Side absorption** — a file with a muscle but no side joins that
+      muscle's single known side for the visit.  It only keeps an empty side
+      (becoming its own "side unspecified" target) when the visit genuinely
+      recorded that muscle on two or more sides, so the file cannot be
+      attributed.
+    * **Single-target collapse** — when the visit resolves to at most one
+      identified target, *every* row collapses onto it, including rows with no
+      muscle header at all (peripheral nerve-excitability files).  This is the
+      overwhelmingly common case and reproduces the historical
+      one-row-per-visit behaviour exactly.  Only when two or more targets are
+      identified do muscle-less rows stay on their own visit-level row, where
+      the cortex/target-independent graph types still find them.
+    """
+    resolved: dict = {}
+    sides_by_muscle: dict[str, set[str]] = defaultdict(set)
+
+    raw: dict = {}
+    for idx in group.index:
+        muscle, side = target_key(
+            group.at[idx, MUSCLE_COLUMN] if MUSCLE_COLUMN in group.columns else None,
+            group.at[idx, SIDE_COLUMN] if SIDE_COLUMN in group.columns else None,
+        )
+        raw[idx] = (muscle, side)
+        if muscle and side:
+            sides_by_muscle[muscle].add(side)
+
+    for idx, (muscle, side) in raw.items():
+        if not muscle:
+            resolved[idx] = ("", "")
+        elif side:
+            resolved[idx] = (muscle, side)
+        else:
+            known = sides_by_muscle.get(muscle, set())
+            resolved[idx] = (muscle, known.pop()) if len(known) == 1 else (muscle, "")
+
+    identified = {t for t in resolved.values() if t[0]}
+    if len(identified) <= 1:
+        only = identified.pop() if identified else ("", "")
+        return {idx: only for idx in resolved}
+    return resolved
+
+
+def target_labels_in(rows: pd.DataFrame) -> list[str]:
+    """Return the distinct recording-target labels present in *rows*.
+
+    Ordered hand muscles first, then by muscle and side, so a report lists
+    ``["Right FDI", "Right TA"]`` rather than an arbitrary order. Rows with no
+    identified muscle contribute nothing — they are visit-level data, not a
+    selectable target.
+    """
+    if MUSCLE_COLUMN not in rows.columns:
+        return []
+    pairs = {
+        target_key(row[MUSCLE_COLUMN], row.get(SIDE_COLUMN))
+        for _, row in rows.iterrows()
+    }
+    pairs = {p for p in pairs if p[0]}
+    ordered = sorted(
+        pairs, key=lambda p: (0 if is_hand_muscle(p[0]) else 1, p[0], p[1]),
+    )
+    return [target_label(m, s) for m, s in ordered]
+
+
+def restrict_participant_to_target(
+    df: pd.DataFrame, participant_id, target: str | None,
+) -> pd.DataFrame:
+    """Return *df* with one participant's rows restricted to one recording target.
+
+    Only that participant is filtered. Cohort reference groups stay pooled
+    across muscles by design, so a right-TA trace is still drawn against the
+    whole reference cohort rather than a TA-only subset — every other
+    participant's rows pass through untouched.
+
+    The participant's own rows that carry no target are kept as well: they hold
+    visit-level data (the CMAP/MUNIX tables) that belongs to the visit rather
+    than to any one muscle.
+    """
+    if not target or MUSCLE_COLUMN not in df.columns or participant_id is None:
+        return df
+    labels = df.apply(
+        lambda r: target_label(r[MUSCLE_COLUMN], r.get(SIDE_COLUMN)), axis=1,
+    )
+    is_participant = pd.to_numeric(df["ID"], errors="coerce") == participant_id
+    return df[~is_participant | (labels == target) | (labels == "")]
+
+
+def _merge_group(group: pd.DataFrame, output_cols: list[str]) -> dict:
+    """Combine one target's rows by taking the first non-null value per column."""
+    out: dict = {}
+    for col in output_cols:
+        if col == "source_file":
+            names: list[str] = []
+            seen: set[str] = set()
+            for v in group[col].tolist():
+                for n in _split_source_files(v):
+                    if n not in seen:
+                        seen.add(n)
+                        names.append(n)
+            out[col] = SOURCE_FILE_SEPARATOR.join(names) if names else np.nan
+            continue
+        non_null = group[col].dropna()
+        out[col] = non_null.iloc[0] if not non_null.empty else np.nan
+    return out
+
+
 def _coalesce_same_session_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Collapse rows sharing the same (ID, Date) into a single row.
+    """Collapse rows sharing the same (ID, Date, recording target) into one row.
 
     Multiple .MEM files for the same participant collected on the same date
-    typically hold complementary measures (e.g. one file carries RMT data,
-    another the T-SICI block). This combines them by taking the first
-    non-null value per column across the group. ``source_file`` is joined
-    with ``SOURCE_FILE_SEPARATOR`` so the provenance of every contributing
-    file is preserved. Rows lacking ID or Date are passed through unchanged.
+    hold either complementary measures of the same recording (e.g. one file
+    carries RMT data, another the T-SICI block) or the *same* measure recorded
+    from a different muscle/side (left FDI vs right FDI vs right TA).  The
+    first kind must combine into one row; the second must not, or one
+    recording silently overwrites the other.  Rows are therefore grouped by
+    (ID, Date, target) — see :func:`resolve_visit_targets` for how the target
+    is decided when the muscle/side headers are missing.
+
+    Within a group, values combine by taking the first non-null per column.
+    ``source_file`` is joined with ``SOURCE_FILE_SEPARATOR`` so the provenance
+    of every contributing file is preserved, and the resolved muscle/side are
+    written back so the row consistently carries its own target.  Rows lacking
+    ID or Date are passed through unchanged.
     """
     if df.empty or "ID" not in df.columns or "Date" not in df.columns:
         return df
@@ -470,26 +615,22 @@ def _coalesce_same_session_rows(df: pd.DataFrame) -> pd.DataFrame:
 
     output_cols = [c for c in df.columns if c not in ("_g_id", "_g_date")]
     combined_rows: list[dict] = []
-    for _, group in keyed.groupby(["_g_id", "_g_date"], sort=False):
-        if len(group) == 1:
-            row = group.iloc[0]
-            combined_rows.append({c: row[c] for c in output_cols})
-            continue
-        out: dict = {}
-        for col in output_cols:
-            if col == "source_file":
-                names: list[str] = []
-                seen: set[str] = set()
-                for v in group[col].tolist():
-                    for n in _split_source_files(v):
-                        if n not in seen:
-                            seen.add(n)
-                            names.append(n)
-                out[col] = SOURCE_FILE_SEPARATOR.join(names) if names else np.nan
-                continue
-            non_null = group[col].dropna()
-            out[col] = non_null.iloc[0] if not non_null.empty else np.nan
-        combined_rows.append(out)
+    for _, visit in keyed.groupby(["_g_id", "_g_date"], sort=False):
+        targets = resolve_visit_targets(visit)
+        for target in dict.fromkeys(targets.values()):  # preserve first-seen order
+            indices = [i for i, t in targets.items() if t == target]
+            group = visit.loc[indices]
+            out = (
+                {c: group.iloc[0][c] for c in output_cols}
+                if len(group) == 1
+                else _merge_group(group, output_cols)
+            )
+            muscle, side = target
+            if MUSCLE_COLUMN in output_cols:
+                out[MUSCLE_COLUMN] = muscle or np.nan
+            if SIDE_COLUMN in output_cols:
+                out[SIDE_COLUMN] = side or np.nan
+            combined_rows.append(out)
 
     combined = pd.DataFrame(combined_rows, columns=output_cols)
     if unkeyed.empty:
@@ -551,6 +692,101 @@ def load_existing_csv(csv_path: str | Path) -> pd.DataFrame:
     return _normalize_mem_dataframe(existing)
 
 
+# Columns that load_existing_csv synthesises for legacy archives, so their
+# absence from an archive must NOT make it look schema-stale.
+_SYNTHESISED_LEGACY_COLUMNS = {"Study"}
+
+
+def _expected_schema_columns() -> set:
+    """Parser-derived columns an up-to-date archive must carry (excluding the
+    columns load_existing_csv backfills for legacy CSVs)."""
+    return (set(output_column_order()) | {"source_file"}) - _SYNTHESISED_LEGACY_COLUMNS
+
+
+# The columns that define a row's *identity* rather than its contents.
+_TARGET_IDENTITY_COLUMNS = {MUSCLE_COLUMN, SIDE_COLUMN}
+
+
+def archive_predates_recording_targets(raw_existing_cols: set) -> bool:
+    """Whether an archive was written before rows were split by recording target.
+
+    Such an archive holds one already-coalesced row per visit: a visit that
+    recorded two muscles had them merged together, and whichever values lost
+    the first-non-null race are simply gone.  Unlike an ordinary new column
+    this cannot be backfilled — the row *identity* is wrong, not just
+    incomplete — so the caller must discard those rows and re-parse instead.
+    """
+    return bool(raw_existing_cols) and not _TARGET_IDENTITY_COLUMNS.issubset(
+        raw_existing_cols
+    )
+
+
+def csv_schema_is_current(csv_path: str | Path | None) -> bool:
+    """Return whether *csv_path*'s RAW header already carries every parser
+    column the current schema expects.
+
+    Judged on the file's original columns (not a normalised frame, which always
+    has the full set), so an archive that predates newer columns (e.g. SR/SD) is
+    correctly reported as stale. Returns ``False`` when the path is missing or
+    its header cannot be read.
+    """
+    if csv_path is None or not Path(csv_path).exists():
+        return False
+    try:
+        raw_cols = set(pd.read_csv(csv_path, nrows=0).columns)
+    except Exception:
+        return False
+    return _expected_schema_columns().issubset(raw_cols)
+
+
+def _backfill_new_parser_columns(
+    df: pd.DataFrame, mem_files: list, raw_existing_cols: set,
+) -> pd.DataFrame:
+    """Populate parser-derived columns that a stale archive lacked (e.g. SR/SD)
+    onto rows that predate them, by re-parsing each MEM file and matching on
+    ``source_file``.
+
+    Only *newly-added* columns are written, and only where currently null, so
+    archived data — including CSP/CMAP values that come from other folders and
+    are NOT reproduced by ``parse_mem_file`` — is never overwritten or lost.
+    """
+    missing = [
+        c for c in output_column_order()
+        if c not in raw_existing_cols and c != "source_file"
+    ]
+    if not missing or df.empty:
+        return df
+
+    lookup: dict[str, dict] = {}
+    for filepath in mem_files:
+        record = parse_mem_file(filepath)
+        lookup[filepath.name] = {c: record.get(c) for c in missing}
+
+    df = df.copy()
+    for c in missing:
+        if c not in df.columns:
+            df[c] = np.nan
+        # A column absent from the stale archive normalises to all-NaN float64;
+        # cast to object so it can hold either numeric scalars or JSON strings
+        # (SR_curve / SD_points). _normalize_mem_dataframe re-coerces the numeric
+        # columns afterwards.
+        df[c] = df[c].astype(object)
+    for idx in df.index:
+        for fname in _split_source_files(df.at[idx, "source_file"]):
+            payload = lookup.get(fname)
+            if not payload:
+                continue
+            for c in missing:
+                value = payload[c]
+                current = df.at[idx, c]
+                is_null = current is None or (
+                    isinstance(current, float) and np.isnan(current)
+                )
+                if is_null and value is not None:
+                    df.at[idx, c] = value
+    return df
+
+
 # ---------------------------------------------------------------------------
 # High-level build functions
 # ---------------------------------------------------------------------------
@@ -607,13 +843,14 @@ def build_combined_dataframe_incremental(
 
     Workflow
     -------
-    1. List .MEM filenames in *mem_dir*.
+    1. List .MEM filenames in *mem_dir* and (separately) the CSP folder.
     2. If *existing_csv* is provided, load it and diff the ``source_file``
-       column against the folder listing.
-    3. If the sets match exactly (no new files, no removed files, schema is
-       current) — return the existing DataFrame as-is.
-    4. Otherwise, parse only the **new** files, combine with existing rows
-       (dropping rows for removed files), re-merge CSP data, normalise, and
+       column against both folder listings.
+    3. If nothing changed (no new/removed .MEM files, no new CSP files, schema
+       is current) — return the existing DataFrame as-is.
+    4. Otherwise, parse only the **new** .MEM files, combine with existing rows
+       (dropping rows for removed files), re-merge CSP data — which appends any
+       new CSP-only visit as its own row — re-merge CMAP, normalise, and
        return.
 
     Parameters
@@ -631,7 +868,8 @@ def build_combined_dataframe_incremental(
     pd.DataFrame
         The attrs dict on the returned DataFrame contains metadata:
 
-        - ``new_files_parsed`` : int
+        - ``new_files_parsed`` : int  (new .MEM files)
+        - ``new_csp_files_merged`` : int  (new CSP files not previously seen)
         - ``removed_files_dropped`` : int
         - ``reused_existing`` : bool
         - ``total_mem_files`` : int
@@ -659,26 +897,45 @@ def build_combined_dataframe_incremental(
 
     # ---- Load existing CSV (if any) ----
     if existing_csv is not None and Path(existing_csv).exists():
+        # Capture the archive's *raw* columns before load_existing_csv
+        # normalises the frame — normalisation backfills any missing columns,
+        # which would otherwise mask a stale (older-schema) archive.
+        raw_existing_cols = set(pd.read_csv(existing_csv, nrows=0).columns)
         existing_df = load_existing_csv(existing_csv)
         existing_names = _source_file_set(existing_df)
     else:
+        raw_existing_cols = set()
         existing_df = pd.DataFrame(columns=output_column_order())
         existing_names = set()
 
     new_names = mem_filenames - existing_names
+    # New CSP files must be diffed separately from MEM files. A follow-up visit
+    # often adds *only* a cortical-silent-period recording (no new main .MEM
+    # file), and the CSP folder is excluded from the MEM scan above. Without
+    # this check the fast path would see no MEM changes and skip the CSP
+    # re-merge, so the returning participant's new visit would never enter the
+    # DataFrame.
+    new_csp_names = csp_filenames - existing_names
     # Rows in the CSV whose source file is no longer present in EITHER source
     # folder. Must be dropped to keep the DataFrame in sync with disk.
     orphan_names = existing_names - mem_filenames - csp_filenames
 
     # ---- Fast path: nothing changed ----
-    expected_cols = set(output_column_order()) | {"source_file"}
-    schema_current = expected_cols.issubset(set(existing_df.columns))
+    # Judge schema-currency on the archive's ORIGINAL columns, not the
+    # normalised frame (which always carries the full column set). An archive
+    # that predates a column the parser now produces (e.g. SR/SD) is stale and
+    # its rows must be backfilled with those columns below, not left NaN.
+    schema_current = _expected_schema_columns().issubset(raw_existing_cols)
 
-    if not new_names and not orphan_names and schema_current:
+    if not new_names and not new_csp_names and not orphan_names and schema_current:
         result = existing_df.copy()
         result.attrs["new_files_parsed"] = 0
+        result.attrs["new_csp_files_merged"] = 0
         result.attrs["removed_files_dropped"] = 0
         result.attrs["reused_existing"] = True
+        # Reaching the fast path means the schema is current, which includes the
+        # muscle/side columns — so no target rebuild was needed.
+        result.attrs["target_rebuild"] = False
         result.attrs["total_mem_files"] = len(mem_files)
         return result
 
@@ -687,7 +944,22 @@ def build_combined_dataframe_incremental(
     # A coalesced row (multiple .MEM files joined into one row) is dropped
     # in full if any of its constituent files is missing — the remaining
     # files get re-parsed below so the rebuilt row stays consistent.
-    if not existing_df.empty:
+    # Existing rows are ALWAYS kept (never dropped just because the schema is
+    # stale): they carry CSP/CMAP data that comes from other folders and is not
+    # reproduced by parse_mem_file, so dropping them could lose that data when a
+    # folder is unavailable. Newly-added parser columns (e.g. SR/SD) are instead
+    # backfilled onto these rows after the merges (see _backfill_new_parser_columns).
+    # An archive that predates recording targets is the one exception: its rows
+    # merged several muscles together, so they must be discarded and every .MEM
+    # file re-parsed rather than kept and backfilled (see
+    # archive_predates_recording_targets). CSP/CMAP data is regenerated by the
+    # re-merges below, but only from folders selected for THIS run — hence the
+    # availability warnings recorded in attrs afterwards.
+    target_rebuild = archive_predates_recording_targets(raw_existing_cols)
+
+    if target_rebuild:
+        kept_df = existing_df.iloc[0:0].copy()
+    elif not existing_df.empty:
         def _all_on_disk(value) -> bool:
             files = _split_source_files(value)
             return bool(files) and all(n in mem_filenames for n in files)
@@ -726,9 +998,36 @@ def build_combined_dataframe_incremental(
 
     combined = _coalesce_same_session_rows(_normalize_mem_dataframe(combined))
     combined = _normalize_mem_dataframe(combined)
+
+    # Schema upgrade: the archive predated some parser columns (e.g. SR/SD), so
+    # the kept rows are missing them. Backfill just those columns from a re-parse
+    # of the MEM files, leaving all other (incl. CSP/CMAP) data untouched.
+    # A target rebuild kept no rows, so there is nothing to backfill.
+    schema_stale = bool(existing_names) and not schema_current
+    if schema_stale and not target_rebuild:
+        combined = _normalize_mem_dataframe(
+            _backfill_new_parser_columns(combined, mem_files, raw_existing_cols)
+        )
+
     combined.attrs["new_files_parsed"] = len(new_names)
+    combined.attrs["new_csp_files_merged"] = len(new_csp_names)
     combined.attrs["removed_files_dropped"] = len(orphan_names)
     combined.attrs["reused_existing"] = False
+    combined.attrs["schema_rebuilt"] = schema_stale
+    combined.attrs["target_rebuild"] = target_rebuild
+    # A rebuild regenerates CSP/CMAP only from the folders selected for this
+    # run. If the archive carried data this run cannot reproduce, say so rather
+    # than silently returning a thinner DataFrame than the user started with.
+    combined.attrs["target_rebuild_lost_csp"] = bool(
+        target_rebuild
+        and not csp_filenames
+        and _has_any_value(existing_df, CSP_VALUE_COLUMNS)
+    )
+    combined.attrs["target_rebuild_lost_cmap"] = bool(
+        target_rebuild
+        and not normalize_dirs(cmap_dir)
+        and _has_any_value(existing_df, ["CMAP_table", "MUNIX_table"])
+    )
     combined.attrs["total_mem_files"] = len(mem_files)
     return combined
 
@@ -763,9 +1062,17 @@ def participant_data_is_current(
     mem_dir: str | Path,
     csv_path: str | Path,
 ) -> bool:
-    """Return ``True`` if every .MEM file for *participant_id* is in the CSV."""
+    """Return ``True`` if every .MEM file for *participant_id* is in the CSV
+    AND the CSV's schema is current.
+
+    The schema check prevents reusing an archive that predates newer parser
+    columns (e.g. SR/SD): such an archive lists the files but lacks the data, so
+    it must fall through to an incremental build that backfills those columns.
+    """
     mem_files = participant_mem_files(participant_id, mem_dir)
     if not mem_files:
+        return False
+    if not csv_schema_is_current(csv_path):
         return False
     existing_df = load_existing_csv(csv_path)
     csv_sources = _source_file_set(existing_df)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import matplotlib
 matplotlib.use("Agg")  # noqa: E402 — must precede any pyplot import
 
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -19,6 +20,8 @@ from core.user_settings import (
     KEY_MEM_RECURSIVE, KEY_CSP_RECURSIVE, KEY_CMAP_RECURSIVE,
     KEY_EXPORT_CSV, KEY_EXPORT_PDF, KEY_SYNC_PAIRS,
     KEY_EXCLUDED_MEASUREMENTS, KEY_EXCLUDED_PARTICIPANTS,
+    KEY_OUTLIER_BOUNDS,
+    KEY_SKIPPED_PAGES,
     KEY_REDCAP_DATA_DIR, KEY_REDCAP_DICT_DIR,
     KEY_REDCAP_TEMPLATE_DIR, KEY_REDCAP_EXPORT_DIR,
     KEY_REDCAP_XLSX_DIR,
@@ -27,11 +30,15 @@ from core.user_settings import (
     KEY_EMAIL_DEFAULT_TO, KEY_EMAIL_DEFAULT_CC, KEY_EMAIL_DEFAULT_BCC,
     KEY_EMAIL_SUBJECT, KEY_EMAIL_BODY, KEY_EMAIL_REMEMBER_PASSWORD,
 )
-from parser.mem_parser import iter_mem_files
+from parser.recording_target import MUSCLE_COLUMN
 from processing.df_builder import (
     _apply_cmap_merge,
+    archive_predates_recording_targets,
     build_combined_dataframe_incremental,
+    csv_schema_is_current,
     load_existing_csv,
+    restrict_participant_to_target,
+    target_labels_in,
 )
 from processing.visualizer import (
     CSP_MEASURE_LABEL,
@@ -43,8 +50,15 @@ from processing.visualizer import (
     waveform_measure_config,
     plot_mem_graph,
 )
+from processing.figure_style import enlarge_result_figures
 from reports.csv_exporter import find_latest_csv
 from reports.report_builder import build_header_only_figure
+from parser.sr_parser import SR_CURVE_COLUMN, SR_MAX_COLUMN
+from parser.strength_duration_parser import (
+    SD_POINTS_COLUMN,
+    SD_RHEOBASE_COLUMN,
+    SD_TAU_COLUMN,
+)
 
 
 def _as_path_list(value) -> list[str]:
@@ -62,6 +76,13 @@ class AppController:
     # Default directory to look for archive CSVs (sibling of MEM_DIR).
     _CSV_ARCHIVE_DIR = MEM_DIR.parent / "SNBR_CSV_Archive"
 
+    # Optional workflow pages that may be hidden from the linear Next/Back flow
+    # via "Skip this page in future runs". Required pages (paths, data, the
+    # participant/visualization/export core) are deliberately excluded so a
+    # skip can never strand the user. Skipped pages stay reachable from the
+    # toolbar page-jump dropdown.
+    SKIPPABLE_PAGES = frozenset({"exclusion", "email", "redcap", "sync"})
+
     def __init__(self):
         self._mem_paths: list[str] = []
         self._csp_paths: list[str] = []
@@ -70,6 +91,20 @@ class AppController:
         self._mem_recursive: bool = False
         self._csp_recursive: bool = False
         self._cmap_recursive: bool = False
+        # Memoized {filename: Path} index over the MEM folder(s), rebuilt only
+        # when the paths/recursion change. Avoids re-scanning the whole MEM
+        # directory on every peripheral (SR/SD) plot that falls back to reading
+        # its source file.
+        self._mem_file_index: dict | None = None
+        self._mem_index_key: tuple | None = None
+        # True when the working DataFrame was loaded from a schema-stale archive
+        # WITHOUT re-parsing (the fast "archive as-is" path), so its newer parser
+        # columns (e.g. SR/SD) are present-but-empty. Used to avoid exporting a
+        # CSV that looks schema-current but has no SR/SD data. The companion
+        # snapshot records that archive's raw columns AT LOAD TIME so the export
+        # decision can't drift if the CSV path changes or the file is replaced.
+        self._schema_stale: bool = False
+        self._stale_raw_cols: set | None = None
         self._csv_path: str = ""  # a *file* path, not a directory
         self._dataframe: pd.DataFrame | None = None
         self._quick_start_message: str = ""
@@ -79,6 +114,13 @@ class AppController:
         # startup; mutated in-session by the exclusion panel and only
         # re-persisted when the user saves.
         self._excluded_tests: dict[int, set[str]] = {}
+
+        # Cohort-wide outlier cutoffs per measure: {measure_key: {"lower":
+        # float|None, "upper": float|None}}. Any participant-visit whose average
+        # for a measure falls outside its range is blanked for that measure
+        # (dropped from cohort averages, blanked in the CSV), applied on top of
+        # the per-participant exclusions above.
+        self._outlier_bounds: dict[str, dict[str, float | None]] = {}
 
         self._apply_defaults()
 
@@ -111,6 +153,12 @@ class AppController:
         self._default_export_csv = saved.get(KEY_EXPORT_CSV, "")
         self._default_export_pdf = saved.get(KEY_EXPORT_PDF, "")
 
+        # Pages the user has chosen to skip in the linear workflow flow.
+        self._skipped_pages: set[str] = {
+            str(p) for p in saved.get(KEY_SKIPPED_PAGES, [])
+            if str(p) in self.SKIPPABLE_PAGES
+        }
+
         # Excluded tests — apply saved defaults to the active session.
         self._excluded_tests = self._coerce_excluded_map(
             saved.get(KEY_EXCLUDED_MEASUREMENTS, {})
@@ -124,6 +172,11 @@ class AppController:
             if legacy_ids:
                 all_tests = set(self.EXCLUDABLE_TEST_KEYS)
                 self._excluded_tests = {pid: set(all_tests) for pid in legacy_ids}
+
+        # Cohort-wide outlier bounds — apply saved defaults to the session.
+        self._outlier_bounds = self._coerce_outlier_bounds(
+            saved.get(KEY_OUTLIER_BOUNDS, {})
+        )
 
     def get_default_export_paths(self) -> dict[str, str]:
         return {
@@ -149,6 +202,8 @@ class AppController:
         self._default_export_csv = ""
         self._default_export_pdf = ""
         self._excluded_tests = {}
+        self._outlier_bounds = {}
+        self._skipped_pages = set()
 
     def set_paths(
         self, mem_path, csp_path="", csv_path: str = "",
@@ -229,6 +284,33 @@ class AppController:
             df = _apply_cmap_merge(
                 df, self._cmap_paths, recursive=self._cmap_recursive,
             )
+        # Flag when the archive predates newer parser columns (e.g. SR/SD): this
+        # "as-is" load does no folder scan, so those columns stay empty and their
+        # graphs will be unavailable until a re-parse. The UI surfaces this, and
+        # the export path avoids writing a misleadingly schema-current CSV.
+        stale = not csv_schema_is_current(self._csv_path)
+        df.attrs["schema_stale"] = stale
+        self._schema_stale = stale
+        # Reported separately from generic staleness: an archive without the
+        # muscle/side columns still has multi-muscle visits merged onto a single
+        # row, which no amount of column backfilling can undo.
+        try:
+            df.attrs["targets_stale"] = archive_predates_recording_targets(
+                set(pd.read_csv(self._csv_path, nrows=0).columns)
+            )
+        except Exception:
+            df.attrs["targets_stale"] = False
+        # Snapshot the archive's raw columns now (the file was just read
+        # successfully by load_existing_csv), so the export-time drop compares
+        # against the header this frame was actually loaded from — not a later
+        # value of self._csv_path or a file replaced on disk.
+        if stale:
+            try:
+                self._stale_raw_cols = set(pd.read_csv(self._csv_path, nrows=0).columns)
+            except Exception:
+                self._stale_raw_cols = set()  # unreadable → drop empty new cols
+        else:
+            self._stale_raw_cols = None
         self._dataframe = df
         return df
 
@@ -243,25 +325,12 @@ class AppController:
             csp_recursive=self._csp_recursive,
             cmap_recursive=self._cmap_recursive,
         )
+        # A re-parse populates the current schema (SR/SD backfilled), so the
+        # working frame is no longer schema-stale.
+        self._schema_stale = False
+        self._stale_raw_cols = None
         self._dataframe = df
         return df
-
-    def count_new_mem_files(self, df: pd.DataFrame) -> int:
-        """Count .MEM files across the MEM directories not present in the DataFrame."""
-        if not any(Path(p).is_dir() for p in self._mem_paths):
-            return 0
-        all_files = {
-            p.name
-            for p in iter_mem_files(
-                self._mem_paths,
-                exclude_dirs=[self._csp_paths or None, self._cmap_paths or None],
-                recursive=self._mem_recursive,
-            )
-        }
-        if "source_file" not in df.columns:
-            return len(all_files)
-        known = set(df["source_file"].dropna().unique())
-        return len(all_files - known)
 
     def set_dataframe(self, df: pd.DataFrame):
         self._dataframe = df
@@ -272,6 +341,28 @@ class AppController:
     # ── Participant / date queries ─────────────────────────
 
     _DATE_FMT = "%d/%m/%Y"
+
+    # Graph types whose data is peripheral / visit-level, not cortex-specific.
+    # Their availability must be judged against ALL of a visit's rows, not the
+    # cortex-filtered subset: the peripheral .MEM rows (SR/SD/CMAP/MUNIX) carry
+    # no Stimulated_cortex, so a single-cortex selection would otherwise grey
+    # them out even though they exist and the render path (which ignores cortex)
+    # can draw them.
+    _CORTEX_INDEPENDENT_GRAPH_TYPES = frozenset({
+        "visit_timeline", "visit_table", "cmap_table", "munix_table",
+        "stimulus_response", "strength_duration_curve", "charge_duration_weiss",
+    })
+
+    # Graph types that describe the whole visit rather than one recording:
+    # the visit's date list and the nerve-conduction tables read the same no
+    # matter which muscle the user is looking at, so they are rendered once
+    # instead of once per selected target. SR/SD are deliberately absent —
+    # peripheral recordings ARE per-muscle (an APB stimulus-response curve is
+    # not a TA one), and since parsing "S/R sites:" gives those rows a target
+    # they now sit on the matching muscle's row.
+    _TARGET_INDEPENDENT_GRAPH_TYPES = frozenset({
+        "visit_timeline", "visit_table", "cmap_table", "munix_table",
+    })
 
     def _filter_by_study(self, df: pd.DataFrame, study_filter: str | None) -> pd.DataFrame:
         """Apply a study filter to the DataFrame if provided."""
@@ -412,6 +503,41 @@ class AppController:
         return out
 
     @classmethod
+    def _coerce_outlier_bounds(cls, value) -> dict[str, dict[str, float | None]]:
+        """Coerce a stored {measure: {"lower":.., "upper":..}} mapping.
+
+        Drops unknown measures and unparseable numbers; omits a measure entirely
+        if neither bound is a finite number. A stored lower > upper is kept as
+        given (the panel/consumer treats it as "no value passes", which is the
+        honest reading of a contradictory range).
+        """
+        out: dict[str, dict[str, float | None]] = {}
+        if not isinstance(value, dict):
+            return out
+        valid = set(cls.EXCLUDABLE_TEST_KEYS)
+        for measure, bounds in value.items():
+            key = str(measure)
+            if key not in valid or not isinstance(bounds, dict):
+                continue
+            lower = cls._coerce_bound(bounds.get("lower"))
+            upper = cls._coerce_bound(bounds.get("upper"))
+            if lower is None and upper is None:
+                continue
+            out[key] = {"lower": lower, "upper": upper}
+        return out
+
+    @staticmethod
+    def _coerce_bound(value) -> float | None:
+        """Coerce a single bound to a finite float, or None if unset/invalid."""
+        if value is None or value == "":
+            return None
+        try:
+            num = float(value)
+        except (ValueError, TypeError):
+            return None
+        return num if np.isfinite(num) else None
+
+    @classmethod
     def _test_label(cls, test_key: str) -> str:
         """Human-readable label for a test key (e.g. 't_sicf' -> 'T-SICF')."""
         if test_key in WAVEFORM_MEASURE_CONFIGS:
@@ -437,6 +563,45 @@ class AppController:
         if test_key == "rmt":
             return list(RMT_COLUMNS)
         return []
+
+    @staticmethod
+    def _measure_value_columns(test_key: str) -> list[str]:
+        """Sub-value columns whose mean is the measure's per-visit average.
+
+        Unlike :meth:`_test_columns` this excludes the stored ``*_avg`` column
+        (that column *is* the mean of these), so the outlier check aggregates
+        the raw sub-values: each ISI for SICI/SICF, each %RMT level for CSP, and
+        each RMT column.
+        """
+        if test_key in WAVEFORM_MEASURE_CONFIGS:
+            cfg = WAVEFORM_MEASURE_CONFIGS[test_key]
+            return [f"{cfg['prefix']}_{isi}" for isi in cfg.get("isis", [])]
+        if test_key == "csp":
+            return list(CSP_PROFILE_COLUMNS)
+        if test_key == "rmt":
+            return list(RMT_COLUMNS)
+        return []
+
+    @classmethod
+    def _measure_aggregate_series(cls, df: pd.DataFrame, test_key: str) -> pd.Series:
+        """Per-row average value for *test_key* — the number outlier bounds test.
+
+        For SICI/SICF the parser already stores the across-ISI mean in the
+        ``*_avg`` column, so that is used directly; CSP and RMT are averaged
+        across their sub-columns on the fly. Missing sub-values are skipped (the
+        parser computes the same skip-NaN mean); a row with no data is NaN and so
+        never flagged as an outlier.
+        """
+        nan_series = pd.Series(np.nan, index=df.index, dtype="float64")
+        if test_key in WAVEFORM_MEASURE_CONFIGS:
+            avg_col = WAVEFORM_MEASURE_CONFIGS[test_key].get("avg_column")
+            if avg_col and avg_col in df.columns:
+                return pd.to_numeric(df[avg_col], errors="coerce")
+        cols = [c for c in cls._measure_value_columns(test_key) if c in df.columns]
+        if not cols:
+            return nan_series
+        numeric = df[cols].apply(pd.to_numeric, errors="coerce")
+        return numeric.mean(axis=1, skipna=True)
 
     @classmethod
     def _test_keys_present(cls, rows: pd.DataFrame) -> list[str]:
@@ -534,6 +699,134 @@ class AppController:
             pid: sorted(tests) for pid, tests in sorted(coerced.items())
         }
 
+    # ── Cohort-wide outlier bounds ────────────────────────
+
+    def has_outlier_bounds(self) -> bool:
+        """True if any measure has a lower or upper cutoff set this session."""
+        return bool(self._outlier_bounds)
+
+    def get_outlier_bound(self, measure: str) -> tuple[float | None, float | None]:
+        """Return ``(lower, upper)`` for *measure* (``None`` where unset)."""
+        bounds = self._outlier_bounds.get(measure) or {}
+        return bounds.get("lower"), bounds.get("upper")
+
+    def set_outlier_bound(self, measure: str, lower, upper) -> None:
+        """Set (or clear) the cohort-wide cutoffs for one measure this session.
+
+        *lower*/*upper* may be numbers, numeric strings, or ``None``/""; each is
+        coerced independently. When both clear, the measure is dropped entirely.
+        Unknown measure keys are ignored.
+        """
+        if measure not in self.EXCLUDABLE_TEST_KEYS:
+            return
+        low = self._coerce_bound(lower)
+        up = self._coerce_bound(upper)
+        if low is None and up is None:
+            self._outlier_bounds.pop(measure, None)
+        else:
+            self._outlier_bounds[measure] = {"lower": low, "upper": up}
+
+    def clear_outlier_bounds(self) -> None:
+        """Drop every outlier bound from the in-session map (does not persist)."""
+        self._outlier_bounds.clear()
+
+    def save_outlier_bounds(self) -> None:
+        """Persist the current outlier-bounds map to saved defaults."""
+        payload = {
+            measure: {"lower": b.get("lower"), "upper": b.get("upper")}
+            for measure, b in self._outlier_bounds.items()
+            if b.get("lower") is not None or b.get("upper") is not None
+        }
+        save_defaults(**{KEY_OUTLIER_BOUNDS: payload})
+
+    def get_saved_outlier_bounds(self) -> dict[str, dict[str, float | None]]:
+        """Return the outlier-bounds map currently persisted on disk."""
+        saved = load_defaults()
+        return self._coerce_outlier_bounds(saved.get(KEY_OUTLIER_BOUNDS, {}))
+
+    def suggest_outlier_bounds(
+        self, measure: str,
+    ) -> tuple[float | None, float | None]:
+        """Suggest ``(lower, upper)`` = mean ∓ 2·SD of *measure*'s per-visit
+        averages across all loaded participants.
+
+        Returns ``(None, None)`` when there is no data or fewer than two values
+        (standard deviation is undefined). The sample standard deviation
+        (``ddof=1``) is used, matching numpy/pandas defaults.
+        """
+        df = self._dataframe
+        if df is None or measure not in self.EXCLUDABLE_TEST_KEYS:
+            return None, None
+        agg = self._measure_aggregate_series(df, measure).dropna()
+        if len(agg) < 2:
+            return None, None
+        mean = float(agg.mean())
+        std = float(agg.std(ddof=1))
+        if not np.isfinite(mean) or not np.isfinite(std):
+            return None, None
+        return mean - 2.0 * std, mean + 2.0 * std
+
+    def get_outlier_excluded_count(self, measure: str) -> int:
+        """How many participant-visit rows *measure*'s bounds currently exclude.
+
+        Counted over the whole loaded frame (no participant is exempted), for
+        display next to the bounds fields.
+        """
+        df = self._dataframe
+        if df is None or "ID" not in df.columns:
+            return 0
+        return int(self._outlier_row_mask(df, measure).sum())
+
+    def get_outlier_bound_rows(self) -> list[dict]:
+        """One row per excludable measure for the bounds table on the panel.
+
+        Each dict has ``key``, ``label``, ``lower``, ``upper``, ``present``
+        (the loaded data has any value for this measure) and ``excluded_count``.
+        """
+        df = self._dataframe
+        present_keys = (
+            set(self._test_keys_present(df))
+            if df is not None and "ID" in df.columns else set()
+        )
+        rows: list[dict] = []
+        for key in self.EXCLUDABLE_TEST_KEYS:
+            lower, upper = self.get_outlier_bound(key)
+            rows.append({
+                "key": key,
+                "label": self._test_label(key),
+                "lower": lower,
+                "upper": upper,
+                "present": key in present_keys,
+                "excluded_count": self.get_outlier_excluded_count(key),
+            })
+        return rows
+
+    # ── Skipped workflow pages ────────────────────────────
+
+    def get_skipped_pages(self) -> set[str]:
+        """Return the set of page names hidden from the linear workflow flow."""
+        return set(self._skipped_pages)
+
+    def is_page_skipped(self, page_name: str) -> bool:
+        """True if *page_name* is currently skipped in the Next/Back flow."""
+        return page_name in self._skipped_pages
+
+    def set_page_skipped(self, page_name: str, skipped: bool) -> None:
+        """Skip or restore *page_name* and persist the choice for future runs.
+
+        No-op for pages that are not in :attr:`SKIPPABLE_PAGES` so a required
+        page can never be hidden from the flow.
+        """
+        if page_name not in self.SKIPPABLE_PAGES:
+            return
+        if skipped:
+            self._skipped_pages.add(page_name)
+        else:
+            self._skipped_pages.discard(page_name)
+        # A falsy (empty) list clears the key entirely; a populated list is
+        # stored. Sorted for a stable, diff-friendly settings file.
+        save_defaults(**{KEY_SKIPPED_PAGES: sorted(self._skipped_pages)})
+
     # ── Applying exclusions ───────────────────────────────
 
     def _measure_excluded_df(
@@ -541,18 +834,27 @@ class AppController:
     ) -> pd.DataFrame | None:
         """Return a copy of *df* with excluded test columns blanked (NaN).
 
-        For each (participant, test) exclusion, the test's value columns are
-        set to NaN in that participant's rows. This removes the participant
-        from that one measure's cohort average (the plotting layer drops rows
-        whose measure value is NaN) and blanks the measure in the exported CSV
-        — while leaving their other tests intact.
+        Two exclusion mechanisms are applied together, per measure:
 
-        *exempt_id* skips one participant entirely — used when plotting so the
-        selected participant's own traces still render (they are already
-        dropped from cohort means by the plotting layer).
+        * **Per-participant** — every (participant, test) the user ticked has
+          that test's columns blanked in *all* of that participant's rows.
+        * **Cohort-wide outlier bounds** — any participant-visit whose average
+          for a measure falls outside that measure's [lower, upper] range has
+          that measure's columns blanked in just that row.
+
+        Blanking removes the row from the measure's cohort average (the plotting
+        layer drops NaN rows) and blanks it in the exported CSV, while leaving
+        other tests intact.
+
+        *exempt_id* skips one participant entirely (for both mechanisms) — used
+        when plotting so the selected participant's own traces still render
+        (they are already dropped from cohort means by the plotting layer).
         """
-        if df is None or not self._excluded_tests or "ID" not in df.columns:
+        if df is None or "ID" not in df.columns:
             return df
+        if not self._excluded_tests and not self._outlier_bounds:
+            return df
+
         exempt = None
         if exempt_id is not None:
             try:
@@ -560,24 +862,50 @@ class AppController:
             except (ValueError, TypeError):
                 exempt = None
 
-        work = None
-        ids = None
+        ids = pd.to_numeric(df["ID"], errors="coerce")
+        # Participants who excluded a given measure by hand (built once).
+        manual_by_measure: dict[str, set[int]] = {}
         for pid, tests in self._excluded_tests.items():
-            if pid == exempt or not tests:
-                continue
-            cols = []
             for test_key in tests:
-                cols.extend(self._test_columns(test_key))
-            cols = [c for c in dict.fromkeys(cols) if c in df.columns]
+                manual_by_measure.setdefault(test_key, set()).add(pid)
+
+        work = None
+        for measure in self.EXCLUDABLE_TEST_KEYS:
+            cols = [c for c in self._test_columns(measure) if c in df.columns]
             if not cols:
                 continue
+
+            manual_pids = manual_by_measure.get(measure)
+            row_mask = (
+                ids.isin(manual_pids) if manual_pids
+                else pd.Series(False, index=df.index)
+            )
+            row_mask = row_mask | self._outlier_row_mask(df, measure)
+            if exempt is not None:
+                row_mask = row_mask & (ids != exempt)
+            if not row_mask.any():
+                continue
+
             if work is None:
                 work = df.copy()
-                ids = pd.to_numeric(work["ID"], errors="coerce")
-            mask = ids == pid
-            if mask.any():
-                work.loc[mask, cols] = np.nan
+            work.loc[row_mask, cols] = np.nan
         return work if work is not None else df
+
+    def _outlier_row_mask(self, df: pd.DataFrame, measure: str) -> pd.Series:
+        """Boolean mask of rows whose *measure* average is out of bounds."""
+        bounds = self._outlier_bounds.get(measure)
+        if not bounds:
+            return pd.Series(False, index=df.index)
+        lower, upper = bounds.get("lower"), bounds.get("upper")
+        if lower is None and upper is None:
+            return pd.Series(False, index=df.index)
+        agg = self._measure_aggregate_series(df, measure)
+        mask = pd.Series(False, index=df.index)
+        if lower is not None:
+            mask = mask | (agg < lower)
+        if upper is not None:
+            mask = mask | (agg > upper)
+        return mask & agg.notna()
 
     def get_export_dataframe(self) -> pd.DataFrame | None:
         """Return the working DataFrame with excluded tests blanked.
@@ -587,7 +915,32 @@ class AppController:
         """
         if self._dataframe is None:
             return None
-        return self._measure_excluded_df(self._dataframe)
+        df = self._measure_excluded_df(self._dataframe)
+        # When the data came from a schema-stale archive that was NOT re-parsed
+        # (the fast "archive as-is" path), the newer parser columns (e.g. SR/SD)
+        # are present-but-empty. Exporting them would yield a CSV whose header
+        # looks schema-current, so the staleness check would never fire again and
+        # SR/SD would stay silently unavailable forever. Drop those empty,
+        # newly-synthesised columns so the exported archive re-parses next load.
+        if self._schema_stale and self._stale_raw_cols is not None:
+            df = self._drop_synthesised_empty_columns(df)
+        return df
+
+    def _drop_synthesised_empty_columns(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Drop columns that are entirely empty AND absent from the loaded
+        archive's raw header — i.e. columns normalisation synthesised for a
+        stale archive that carry no data.
+
+        Uses the load-time snapshot ``self._stale_raw_cols`` (not a fresh read of
+        ``self._csv_path``) so the decision reflects the header this frame was
+        actually loaded from, even if the path changed or the file was replaced.
+        """
+        raw_cols = self._stale_raw_cols or set()
+        to_drop = [
+            c for c in df.columns
+            if c not in raw_cols and df[c].isna().all()
+        ]
+        return df.drop(columns=to_drop) if to_drop else df
 
     # ── Participant / test queries (for the exclusion page) ──
 
@@ -749,6 +1102,96 @@ class AppController:
             df["Stimulated_cortex"].astype("string").fillna("").str.strip() == cortex_value
         ]
 
+    # ── Recording-target selection ────────────────────────
+
+    def get_target_options(
+        self,
+        pid: int,
+        date: datetime,
+        study_filter: str | None = None,
+    ) -> list[str]:
+        """Return the recording-target labels for one participant-visit.
+
+        e.g. ``["Right FDI", "Right TA"]`` for a visit that recorded the same
+        measures from a hand and a leg muscle.  Returns ``[]`` when the frame
+        carries no muscle data at all — an archive that predates recording
+        targets — so callers can fall back to the cortex selector.
+        """
+        df = self._dataframe
+        if df is None or MUSCLE_COLUMN not in df.columns:
+            return []
+        df = self._filter_by_study(df, study_filter)
+        date_str = date.strftime(self._DATE_FMT)
+        rows = df[
+            (pd.to_numeric(df["ID"], errors="coerce") == pid)
+            & (df["Date"] == date_str)
+        ]
+        if rows.empty:
+            return []
+        # Rows with no muscle (a visit-level recording that could not be
+        # attributed) are not selectable targets — they stay visible under
+        # every target instead, see restrict_participant_to_target.
+        return target_labels_in(rows)
+
+    def set_selected_targets(self, targets: list[str] | None):
+        """Store the user's recording-target selection (a list of labels)."""
+        self._selected_targets = [str(t) for t in targets] if targets else []
+
+    def get_selected_targets(self) -> list[str]:
+        return list(getattr(self, "_selected_targets", []))
+
+    def _get_target_filtered_df(
+        self, target: str | None = None, df: pd.DataFrame | None = None,
+    ) -> pd.DataFrame:
+        """Return *df* with the selected participant restricted to one target.
+
+        Only the **selected participant's** rows are filtered.  Cohort
+        reference groups stay pooled across muscles by design, so every other
+        participant's rows pass through untouched — a right-TA trace is still
+        drawn against the whole reference cohort, not a TA-only subset.
+
+        The participant's own rows that carry no target at all are kept too:
+        they hold visit-level data (CMAP/MUNIX tables) that belongs to the
+        visit rather than to one muscle.
+        """
+        if df is None:
+            df = self._dataframe
+        if df is None:
+            raise ValueError("No DataFrame available.")
+        pid, _date = self.get_selected_participant()
+        return restrict_participant_to_target(df, pid, target)
+
+    def _target_scoped_dataframe(self) -> pd.DataFrame:
+        """The working DataFrame, narrowed to the single selected target.
+
+        The specially-built figures (SR/SD curves, CMAP/MUNIX tables) read
+        their rows straight from the frame instead of going through
+        ``plot_mem_graph``, so the target filter has to be applied for them
+        here rather than via a ``data_df`` keyword.
+        """
+        df = self._dataframe
+        if df is None:
+            raise ValueError("No DataFrame available.")
+        targets = self.get_selected_targets()
+        if len(targets) == 1:
+            return self._get_target_filtered_df(targets[0], df=df)
+        return df
+
+    def _target_suffix(self) -> str:
+        """The ``" — Right FDI"`` suffix for figure titles, or ``""``.
+
+        Empty whenever the visit has only one recording target: with nothing to
+        disambiguate, the muscle belongs on the report's title page, not on
+        every plot.
+        """
+        targets = self.get_selected_targets()
+        if len(targets) != 1:
+            return ""
+        pid, date = self.get_selected_participant()
+        if pid is None or date is None:
+            return ""
+        return targets[0] if len(self.get_target_options(pid, date)) > 1 else ""
+
     # ── CMAP figure ───────────────────────────────────────
 
     def _build_cmap_figure_for_selected(self, pid: int, date) -> tuple:
@@ -763,9 +1206,7 @@ class AppController:
         )
         from processing.visualizer import format_participant_label
 
-        df = self._dataframe
-        if df is None:
-            raise ValueError("No DataFrame available.")
+        df = self._target_scoped_dataframe()
 
         date_str = date.strftime(self._DATE_FMT)
         p_rows = df[pd.to_numeric(df["ID"], errors="coerce") == pid]
@@ -774,7 +1215,9 @@ class AppController:
             raise ValueError("No CMAP data for this visit.")
 
         plabel = format_participant_label(pid)
-        fig = _build_cmap_table_figure(plabel, cmap_rows, date_str)
+        fig = _build_cmap_table_figure(
+            plabel, cmap_rows, date_str, self._target_suffix() or None,
+        )
         return fig, None, {"cmap_row_count": len(cmap_rows)}
 
     def _build_munix_figure_for_selected(self, pid: int, date) -> tuple:
@@ -785,9 +1228,7 @@ class AppController:
         )
         from processing.visualizer import format_participant_label
 
-        df = self._dataframe
-        if df is None:
-            raise ValueError("No DataFrame available.")
+        df = self._target_scoped_dataframe()
 
         date_str = date.strftime(self._DATE_FMT)
         p_rows = df[pd.to_numeric(df["ID"], errors="coerce") == pid]
@@ -796,8 +1237,261 @@ class AppController:
             raise ValueError("No MUNIX data for this visit.")
 
         plabel = format_participant_label(pid)
-        fig = _build_munix_table_figure(plabel, munix_rows, date_str)
+        fig = _build_munix_table_figure(
+            plabel, munix_rows, date_str, self._target_suffix() or None,
+        )
         return fig, None, {"munix_row_count": len(munix_rows)}
+
+    # ── Peripheral (SR/SD) plot-data loading ──────────────
+
+    def _get_mem_file_index(self) -> dict:
+        """Return a memoized ``{filename: Path}`` index over the MEM folder(s).
+
+        Rebuilt only when the configured paths / recursion change, so a
+        peripheral (SR/SD) plot that falls back to reading its source file does
+        not trigger a full directory re-scan on every click.
+        """
+        from parser.mem_parser import iter_mem_files
+
+        key = (tuple(self._mem_paths), bool(self._mem_recursive))
+        if self._mem_file_index is None or self._mem_index_key != key:
+            self._mem_file_index = {
+                p.name: p
+                for p in iter_mem_files(self._mem_paths, recursive=self._mem_recursive)
+            }
+            self._mem_index_key = key
+        return self._mem_file_index
+
+    @staticmethod
+    def _first_json_list(rows: pd.DataFrame, column: str) -> list[dict]:
+        """Return the first non-empty JSON list stored in *column*, or ``[]``.
+
+        Lets SR/SD plot data be rebuilt straight from the DataFrame/CSV — fast,
+        and works from an archived CSV without the source .MEM present.
+        """
+        if column not in rows.columns:
+            return []
+        for raw in rows[column].tolist():
+            if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+                continue
+            text = str(raw).strip()
+            if not text or text.lower() == "nan" or text == "[]":
+                continue
+            try:
+                parsed = json.loads(text)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(parsed, list) and parsed:
+                return [p for p in parsed if isinstance(p, dict)]
+        return []
+
+    def _source_file_names(self, rows: pd.DataFrame) -> list[str]:
+        """Flatten a visit's (possibly coalesced) ``source_file`` cells to names."""
+        names: list[str] = []
+        for value in rows["source_file"].tolist():
+            if value is None or (isinstance(value, float) and pd.isna(value)):
+                continue
+            names.extend(n.strip() for n in str(value).split(";") if n.strip())
+        return names
+
+    # ── Stimulus-Response figure ──────────────────────────
+
+    def _load_sr_curve_for_rows(self, rows: pd.DataFrame) -> tuple[list[dict], float | None]:
+        """Load the stimulus-response curve for a visit.
+
+        Prefers the curve persisted in the DataFrame/CSV (``SR_curve``) so the
+        plot renders quickly and works from an archived CSV alone. Falls back to
+        re-parsing the source .MEM (older archives that predate the stored
+        column). Returns ``([], max_cmap)`` when no curve is found.
+        """
+        max_cmap: float | None = None
+        if SR_MAX_COLUMN in rows.columns:
+            stored = pd.to_numeric(rows[SR_MAX_COLUMN], errors="coerce").dropna()
+            if not stored.empty:
+                max_cmap = float(stored.iloc[0])
+
+        # 1) Stored curve column — no file access needed.
+        curve = self._first_json_list(rows, SR_CURVE_COLUMN)
+        if curve:
+            return curve, max_cmap
+
+        # 2) Fall back to re-reading the source .MEM (cached file index).
+        from parser.sr_parser import parse_sr_file
+
+        names = self._source_file_names(rows)
+        if not names:
+            return [], max_cmap
+        file_index = self._get_mem_file_index()
+        for name in names:
+            path = file_index.get(name)
+            if path is None:
+                continue
+            try:
+                block = parse_sr_file(path)
+            except OSError:
+                continue
+            if block.get("curve"):
+                return block["curve"], (
+                    max_cmap if max_cmap is not None else block.get("max_cmap_1ms")
+                )
+        return [], max_cmap
+
+    def _build_sr_figure_for_selected(self, pid: int, date) -> tuple:
+        """Build a stimulus-response scatter for the selected participant/visit.
+
+        Returns a ``(Figure, None, dict)`` tuple so it slots into the same
+        plumbing as ``plot_mem_graph`` results. The plot covers this
+        participant only; the reference Max CMAP at 1 ms is annotated on top.
+        """
+        from reports.report_builder import _build_sr_figure
+        from processing.visualizer import format_participant_label
+
+        df = self._target_scoped_dataframe()
+
+        date_str = date.strftime(self._DATE_FMT)
+        rows = df[
+            (pd.to_numeric(df["ID"], errors="coerce") == pid)
+            & (df["Date"] == date_str)
+        ]
+        if rows.empty:
+            raise ValueError("No stimulus-response data for this visit.")
+
+        curve, max_cmap = self._load_sr_curve_for_rows(rows)
+        if not curve:
+            raise ValueError("No stimulus-response data for this visit.")
+
+        # Prefer the DataFrame's stored reference amplitude; it is the value
+        # persisted to CSV and matches what other views report.
+        if SR_MAX_COLUMN in rows.columns:
+            stored = pd.to_numeric(rows[SR_MAX_COLUMN], errors="coerce").dropna()
+            if not stored.empty:
+                max_cmap = float(stored.iloc[0])
+
+        plabel = format_participant_label(pid)
+        fig = _build_sr_figure(
+            plabel, curve, max_cmap, date_str, self._target_suffix() or None,
+        )
+        return fig, None, {"sr_max_cmap_1ms": max_cmap, "sr_point_count": len(curve)}
+
+    # ── Strength-duration figures ─────────────────────────
+
+    def _load_sd_points_for_rows(
+        self, rows: pd.DataFrame,
+    ) -> tuple[list[dict], float | None, float | None]:
+        """Load the charge-duration points for a visit.
+
+        Prefers the points persisted in the DataFrame/CSV (``SD_points``) so the
+        plots render quickly and work from an archived CSV alone. Falls back to
+        re-parsing the source .MEM (older archives that predate the stored
+        column). Returns ``([], None, None)`` when no points are found. The
+        derived scalars are best-effort here; callers prefer the stored
+        ``Rheobase_mA`` / ``Tau_SD_ms`` columns.
+        """
+        # 1) Stored points column — no file access needed.
+        points = self._first_json_list(rows, SD_POINTS_COLUMN)
+        if points:
+            return points, None, None
+
+        # 2) Fall back to re-reading the source .MEM (cached file index).
+        from parser.strength_duration_parser import parse_strength_duration_file
+
+        names = self._source_file_names(rows)
+        if not names:
+            return [], None, None
+        file_index = self._get_mem_file_index()
+        for name in names:
+            path = file_index.get(name)
+            if path is None:
+                continue
+            try:
+                block = parse_strength_duration_file(path)
+            except OSError:
+                continue
+            if block.get("points"):
+                return (
+                    block["points"],
+                    block.get("rheobase_mA"),
+                    block.get("tau_sd_ms"),
+                )
+        return [], None, None
+
+    def _sd_context_for_selected(self, pid: int, date):
+        """Shared setup for the two strength-duration figures.
+
+        Returns ``(participant_label, date_str, points, rheobase, tau)`` and
+        raises ``ValueError`` when the visit has no charge-duration data. The
+        derived scalars prefer the DataFrame's stored values (what CSV holds),
+        falling back to the values re-parsed from the source file.
+        """
+        from processing.visualizer import format_participant_label
+
+        df = self._target_scoped_dataframe()
+
+        date_str = date.strftime(self._DATE_FMT)
+        rows = df[
+            (pd.to_numeric(df["ID"], errors="coerce") == pid)
+            & (df["Date"] == date_str)
+        ]
+        if rows.empty:
+            raise ValueError("No strength-duration data for this visit.")
+
+        points, rheobase, tau = self._load_sd_points_for_rows(rows)
+        if not points:
+            raise ValueError("No strength-duration data for this visit.")
+
+        # Prefer the DataFrame's stored scalars; they are the values persisted
+        # to CSV and match what other views report.
+        if SD_RHEOBASE_COLUMN in rows.columns:
+            stored = pd.to_numeric(rows[SD_RHEOBASE_COLUMN], errors="coerce").dropna()
+            if not stored.empty:
+                rheobase = float(stored.iloc[0])
+        if SD_TAU_COLUMN in rows.columns:
+            stored = pd.to_numeric(rows[SD_TAU_COLUMN], errors="coerce").dropna()
+            if not stored.empty:
+                tau = float(stored.iloc[0])
+
+        return format_participant_label(pid), date_str, points, rheobase, tau
+
+    def _build_strength_duration_curve_for_selected(self, pid: int, date) -> tuple:
+        """Build the strength-duration curve for the selected participant/visit.
+
+        Returns a ``(Figure, None, dict)`` tuple so it slots into the same
+        plumbing as ``plot_mem_graph`` results. Participant-only; the fitted
+        hyperbola uses the QtracP-derived rheobase and tau.
+        """
+        from reports.report_builder import _build_strength_duration_curve_figure
+
+        plabel, date_str, points, rheobase, tau = self._sd_context_for_selected(pid, date)
+        fig = _build_strength_duration_curve_figure(
+            plabel, points, rheobase, tau, date_str, self._target_suffix() or None,
+        )
+        return fig, None, {
+            "rheobase_mA": rheobase,
+            "tau_sd_ms": tau,
+            "sd_point_count": len(points),
+        }
+
+    def _build_charge_duration_weiss_for_selected(self, pid: int, date) -> tuple:
+        """Build the charge-duration (Weiss) plot for the selected participant/visit.
+
+        Returns a ``(Figure, None, dict)`` tuple. The straight line uses the
+        derived rheobase (slope) and tau (x-intercept = -tau); the fit R^2 is of
+        the measured charge points about that line.
+        """
+        from reports.report_builder import _build_charge_duration_figure
+        from parser.strength_duration_parser import charge_duration_r_squared
+
+        plabel, date_str, points, rheobase, tau = self._sd_context_for_selected(pid, date)
+        r2 = charge_duration_r_squared(points, rheobase, tau)
+        fig = _build_charge_duration_figure(
+            plabel, points, rheobase, tau, r2, date_str, self._target_suffix() or None,
+        )
+        return fig, None, {
+            "rheobase_mA": rheobase,
+            "tau_sd_ms": tau,
+            "r_squared": r2,
+            "sd_point_count": len(points),
+        }
 
     # ── Header figure ─────────────────────────────────────
 
@@ -828,21 +1522,31 @@ class AppController:
 
     # ── Visualization ─────────────────────────────────────
 
-    def _rows_for_selected_visit(self) -> pd.DataFrame | None:
-        """Return the DataFrame rows for the currently selected (pid, date, cortex).
+    def _rows_for_selected_visit(
+        self, apply_cortex: bool = True, target: str | None = None,
+    ) -> pd.DataFrame | None:
+        """Return the DataFrame rows for the currently selected (pid, date).
 
         Does the filter **once** so callers that need to check many
         graph-availability conditions don't re-scan the DataFrame per query.
-        Returns ``None`` when no participant/date is selected.
+        Returns ``None`` when no participant/date is selected. When
+        *apply_cortex* is ``False`` the single-cortex filter is skipped — used
+        for peripheral / visit-level graphs whose data carries no cortex.
+
+        *target* restricts the rows to one recording target; pass ``None`` to
+        keep every target of the visit.
         """
         pid, date = self.get_selected_participant()
         df = self._dataframe
         if df is None or pid is None or date is None:
             return None
 
+        if target:
+            df = self._get_target_filtered_df(target, df=df)
+
         cortex = self.get_selected_cortex()
-        if isinstance(cortex, str):
-            df = self._get_cortex_filtered_df(cortex)
+        if apply_cortex and isinstance(cortex, str):
+            df = self._get_cortex_filtered_df(cortex, df=df)
 
         date_str = date.strftime(self._DATE_FMT)
         return df[
@@ -871,6 +1575,18 @@ class AppController:
             vals = rows[col].dropna().astype(str).str.strip()
             return any(v and v.lower() != "nan" and v != "[]" for v in vals)
 
+        if graph_type == "stimulus_response":
+            return SR_MAX_COLUMN in rows.columns and rows[SR_MAX_COLUMN].notna().any()
+
+        if graph_type in ("strength_duration_curve", "charge_duration_weiss"):
+            # Both derived scalars are needed to draw the fitted line/curve.
+            return (
+                SD_RHEOBASE_COLUMN in rows.columns
+                and rows[SD_RHEOBASE_COLUMN].notna().any()
+                and SD_TAU_COLUMN in rows.columns
+                and rows[SD_TAU_COLUMN].notna().any()
+            )
+
         if graph_type in ("rmt_over_time", "rmt_comparison", "rmt_grouped"):
             for col in RMT_COLUMNS:
                 if col in rows.columns and rows[col].notna().any():
@@ -891,12 +1607,52 @@ class AppController:
 
         return True
 
+    def _participant_has_repeat_trajectory(self, measure: str | None) -> bool:
+        """Whether the selected participant has >= 2 visits with a *measure* value.
+
+        Used to gate the cohort-trajectory graphs, which are only meaningful for
+        participants with repeated visits. Respects the current single-cortex
+        selection (like the other cortex-specific waveform graphs) but scans the
+        participant's whole visit history, not just the selected visit.
+        """
+        if measure is None or measure not in WAVEFORM_MEASURE_CONFIGS:
+            return False
+        pid, _date = self.get_selected_participant()
+        df = self._dataframe
+        if df is None or pid is None:
+            return False
+        cortex = self.get_selected_cortex()
+        if isinstance(cortex, str):
+            df = self._get_cortex_filtered_df(cortex)
+        avg_col = WAVEFORM_MEASURE_CONFIGS[measure]["avg_column"]
+        if avg_col not in df.columns:
+            return False
+        rows = df[pd.to_numeric(df["ID"], errors="coerce") == pid]
+        rows = rows[rows[avg_col].notna()]
+        if rows.empty:
+            return False
+        dates = rows["Date"].astype("string").fillna("").str.strip()
+        return int(dates[dates != ""].nunique()) >= 2
+
     def has_data_for_graph(self, graph_type: str, measure: str | None) -> bool:
         """Fast check whether the selected participant has data for a graph type."""
-        rows = self._rows_for_selected_visit()
-        if rows is None:
-            return False
-        return self._rows_have_graph_data(rows, graph_type, measure)
+        norm_type = str(graph_type).strip().lower().replace("-", "_").replace(" ", "_")
+        if norm_type in self._TRAJECTORY_GRAPH_TYPES:
+            return self._participant_has_repeat_trajectory(measure)
+        apply_cortex = graph_type not in self._CORTEX_INDEPENDENT_GRAPH_TYPES
+        if graph_type in self._CORTEX_INDEPENDENT_GRAPH_TYPES:
+            targets: list[str | None] = [None]
+        else:
+            targets = list(self.get_selected_targets()) or [None]
+        for target in targets:
+            rows = self._rows_for_selected_visit(
+                apply_cortex=apply_cortex, target=target,
+            )
+            if rows is not None and self._rows_have_graph_data(
+                rows, graph_type, measure,
+            ):
+                return True
+        return False
 
     def graph_availability_map(
         self, entries: list,
@@ -910,23 +1666,59 @@ class AppController:
         Use this instead of calling ``has_data_for_graph`` in a loop — it
         eliminates the O(N × df_filter) cost when the visualization panel
         refreshes its ~90 checkboxes.
+
+        Cortex-independent (peripheral / visit-level) graphs are checked
+        against the unfiltered visit rows so a single-cortex selection never
+        hides SR/SD/CMAP/MUNIX data, which lives on cortex-less rows.
+
+        With several recording targets selected, a graph counts as available
+        when **any** selected target can draw it: ticking both hands and a leg
+        must not grey out a measure that only the hand recording carries.
         """
-        rows = self._rows_for_selected_visit()
-        if rows is None:
+        targets = self.get_selected_targets()
+        rows_all = self._rows_for_selected_visit(apply_cortex=False)
+        if rows_all is None:
             return {e.key: False for e in entries}
-        return {
-            e.key: self._rows_have_graph_data(rows, e.graph_type, e.measure)
-            for e in entries
-        }
+
+        # One filtered view per selected target, computed once and reused
+        # across every entry (the panel refreshes ~90 checkboxes at a time).
+        per_target = [
+            self._rows_for_selected_visit(target=t) for t in targets
+        ] or [self._rows_for_selected_visit()]
+
+        result: dict[str, bool] = {}
+        for e in entries:
+            norm_type = str(e.graph_type).strip().lower().replace("-", "_").replace(" ", "_")
+            if norm_type in self._TRAJECTORY_GRAPH_TYPES:
+                result[e.key] = self._participant_has_repeat_trajectory(e.measure)
+            elif e.graph_type in self._CORTEX_INDEPENDENT_GRAPH_TYPES:
+                result[e.key] = self._rows_have_graph_data(
+                    rows_all, e.graph_type, e.measure,
+                )
+            else:
+                result[e.key] = any(
+                    self._rows_have_graph_data(rows, e.graph_type, e.measure)
+                    for rows in per_target
+                )
+        return result
 
     # ── Title builder ────────────────────────────────────
 
     _GRAPH_TYPE_NEEDS_CORTEX_OVERLAY = {
         "profile", "measure_profile",
         "over_time", "participant_over_time", "timeline", "longitudinal",
+        "trajectory", "measure_trajectory", "cohort_trajectory",
         "visit_profiles", "participant_visit_profiles", "visit_profile_grid",
         "rmt_over_time", "participant_rmt_over_time",
     }
+
+    # Cohort-trajectory graph types are only meaningful when the selected
+    # participant has repeated visits, so their availability is judged
+    # participant-wide (>= 2 visits with a value), not on the selected visit's
+    # rows like the other waveform graphs.
+    _TRAJECTORY_GRAPH_TYPES = frozenset({
+        "trajectory", "measure_trajectory", "cohort_trajectory",
+    })
 
     _GRAPH_TYPE_IS_GROUPED = {
         "grouped", "grouped_graph", "cohort", "group_comparison", "comparison",
@@ -1018,6 +1810,11 @@ class AppController:
                 parts.append(f"Averaged {mlabel} over time")
             if cortex_text:
                 parts.append(cortex_text)
+        elif norm_type in {"trajectory", "measure_trajectory", "cohort_trajectory"}:
+            if mlabel:
+                parts.append(f"{mlabel} trajectory vs cohort")
+            if cortex_text:
+                parts.append(cortex_text)
         elif norm_type in {"visit_profiles", "participant_visit_profiles", "visit_profile_grid"}:
             if mlabel:
                 parts.append(f"{mlabel} profile by visit")
@@ -1037,9 +1834,77 @@ class AppController:
             if mlabel:
                 parts.append(mlabel)
 
+        # Name the recording only when the visit has more than one: with a
+        # single target the muscle is stated once on the report's title page
+        # instead of being repeated on every plot.
+        suffix = self._target_suffix()
+        if suffix:
+            parts.append(suffix)
+
         return " | ".join(parts)
 
     # ── Figure generation ─────────────────────────────────
+
+    def _generate_figure_per_target(
+        self, graph_type: str, measure: str | None, targets: list[str], *, match_by=None,
+    ) -> tuple:
+        """Render *graph_type* once per selected recording target.
+
+        Implemented by re-entering :meth:`generate_figure` with a single target
+        selected, so every graph type is multiplied the same way without each
+        individual figure builder having to know about targets.
+
+        Targets with no data for this graph are skipped rather than raising —
+        a visit that recorded T-SICI from the hand and only a stimulus-response
+        curve from the leg should still show the hand's T-SICI.
+
+        Returns ``(figures, axes, data)`` where *data* carries three parallel
+        lists: ``figure_keys`` (the builder's own sub-key, e.g. ``"RMT50"``, so
+        captions keep working), ``figure_targets`` (the target label), and
+        ``figure_data`` (that figure's own plot data, so a caption quotes the
+        values of the figure it sits under).
+        """
+        saved = self.get_selected_targets()
+        figures: list = []
+        axes: list = []
+        keys: list = []
+        target_labels: list = []
+        per_figure: list = []
+        try:
+            for label in targets:
+                self.set_selected_targets([label])
+                try:
+                    figs, axs, data = self.generate_figure(
+                        graph_type, measure, match_by=match_by,
+                    )
+                except (ValueError, KeyError):
+                    continue  # no data for this target — skip it
+                if isinstance(figs, list):
+                    sub_keys = (data or {}).get("figure_keys") or [None] * len(figs)
+                    for i, fig in enumerate(figs):
+                        figures.append(fig)
+                        axes.append(axs[i] if isinstance(axs, list) and i < len(axs) else None)
+                        keys.append(sub_keys[i] if i < len(sub_keys) else None)
+                        target_labels.append(label)
+                        per_figure.append(data)
+                else:
+                    figures.append(figs)
+                    axes.append(axs)
+                    keys.append(None)
+                    target_labels.append(label)
+                    per_figure.append(data)
+        finally:
+            self.set_selected_targets(saved)
+
+        if not figures:
+            raise ValueError("No data for the selected recording targets.")
+
+        combined = {
+            "figure_keys": keys,
+            "figure_targets": target_labels,
+            "figure_data": per_figure,
+        }
+        return figures, axes, combined
 
     def generate_figure(
         self, graph_type: str, measure: str | None, *, match_by=None,
@@ -1056,13 +1921,33 @@ class AppController:
         if pid is None or date is None:
             raise ValueError("No participant/date selected.")
 
+        # Several recording targets selected — render the graph once per
+        # target. Done before the dispatch below so every graph type is
+        # multiplied the same way, including the specially-built SR/SD and
+        # table figures.
+        norm_type = str(graph_type).strip().lower()
+        targets = self.get_selected_targets()
+        if len(targets) > 1 and norm_type not in self._TARGET_INDEPENDENT_GRAPH_TYPES:
+            return self._generate_figure_per_target(
+                graph_type, measure, targets, match_by=match_by,
+            )
+
         # CMAP / MUNIX tables are simple participant-visit tables rendered
         # directly from the DataFrame — no cortex handling, no plot_mem_graph.
-        norm_type = str(graph_type).strip().lower()
         if norm_type == "cmap_table":
             return self._build_cmap_figure_for_selected(pid, date)
         if norm_type == "munix_table":
             return self._build_munix_figure_for_selected(pid, date)
+        if norm_type == "stimulus_response":
+            return enlarge_result_figures(self._build_sr_figure_for_selected(pid, date))
+        if norm_type == "strength_duration_curve":
+            return enlarge_result_figures(
+                self._build_strength_duration_curve_for_selected(pid, date)
+            )
+        if norm_type == "charge_duration_weiss":
+            return enlarge_result_figures(
+                self._build_charge_duration_weiss_for_selected(pid, date)
+            )
 
         cortex = self.get_selected_cortex()
         norm_type = str(graph_type).strip().lower().replace("-", "_").replace(" ", "_")
@@ -1104,9 +1989,24 @@ class AppController:
         else:
             kwargs["data_df"] = base_df
 
-        if measure is not None:
-            return plot_mem_graph(graph_type=graph_type, measure=measure, **kwargs)
-        return plot_mem_graph(graph_type=graph_type, **kwargs)
+        # A single selected target narrows the participant's own rows to that
+        # muscle/side. Applied after the cortex branches so it composes with
+        # them; the reference cohort is left pooled either way.
+        if len(targets) == 1:
+            kwargs["data_df"] = self._get_target_filtered_df(
+                targets[0], df=kwargs["data_df"],
+            )
+
+        result = (
+            plot_mem_graph(graph_type=graph_type, measure=measure, **kwargs)
+            if measure is not None
+            else plot_mem_graph(graph_type=graph_type, **kwargs)
+        )
+        # Enlarge the axis text on real plots. The "visit_table" graph is a
+        # matplotlib table (no axes), so it keeps its hand-tuned layout.
+        if norm_type != "visit_table":
+            enlarge_result_figures(result)
+        return result
 
     def set_selected_graphs(self, keys: list[str]):
         """Store the graph keys the user checked for report generation."""
@@ -1561,8 +2461,17 @@ class AppController:
 
         # Phase 2 — data_mode: load CSV
         if from_index <= 2 < to_index:
-            _status("Loading CSV data...")
-            self.load_csv_dataframe()
+            # If the saved archive predates newer parser columns (e.g. SR/SD)
+            # and a MEM folder is available, do an incremental build so those
+            # columns get backfilled — otherwise this automated report would
+            # silently omit the SR/SD figures.
+            if self._mem_paths and not csv_schema_is_current(self._csv_path):
+                _status("Archive out of date — re-parsing MEM files to add SR/SD...")
+                self.parse_and_build()
+                summary["schema_rebuilt"] = True
+            else:
+                _status("Loading CSV data...")
+                self.load_csv_dataframe()
             df = self.get_dataframe()
             if df is None or df.empty:
                 raise ValueError("Loaded CSV contains no data.")

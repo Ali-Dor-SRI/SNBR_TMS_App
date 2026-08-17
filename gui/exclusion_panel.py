@@ -7,12 +7,18 @@ A participant can have some tests excluded and others kept.
 
 Exclusions take effect immediately for the session; "Save for future" persists
 them so they are re-applied automatically on the next launch.
+
+A "Skip this page in future runs" toggle lets the user drop this (optional) page
+from the linear Next/Back flow. It stays reachable from the toolbar page-jump
+dropdown, and the toggle flips back to "Show this page in future runs" when the
+page is opened while skipped.
 """
 
 from __future__ import annotations
 
 import customtkinter as ctk
 
+from gui.skip_control import SkipStepButton
 from gui.theme import (
     FONT_TITLE, FONT_HEADING, FONT_BODY, FONT_SMALL, FONT_SUBTITLE, FONT_BUTTON,
     ACCENT_COLOR, ACCENT_HOVER, ERROR_COLOR, SUCCESS_COLOR, DISABLED_FG, SUBTITLE_COLOR,
@@ -44,6 +50,13 @@ class ExclusionPanel(ctk.CTkFrame):
         self._test_vars: dict[str, ctk.BooleanVar] = {}
         self._select_all_var = ctk.BooleanVar(value=False)
 
+        # Cohort-wide outlier bounds: per-measure lower/upper entry vars and the
+        # "N excluded" labels beside them. Rebuilt on every refresh().
+        self._bounds_vars: dict[str, tuple[ctk.StringVar, ctk.StringVar]] = {}
+        self._bounds_count_labels: dict[str, ctk.CTkLabel] = {}
+        self._bounds_present: dict[str, bool] = {}
+        self._suppress_bounds_trace = False
+
         self._build_ui()
 
         self._search_var.trace_add("write", self._on_search_changed)
@@ -65,7 +78,8 @@ class ExclusionPanel(ctk.CTkFrame):
                 "Choose a participant, then select which of their tests to exclude "
                 "from the averages in the created report. You can exclude some tests "
                 "for a participant while keeping the rest. Excluded tests are also "
-                "blanked in the exported CSV."
+                "blanked in the exported CSV. To drop outliers across everyone, use "
+                "the Outlier bounds section below to set value cutoffs per measure."
             ),
             font=FONT_SUBTITLE,
             text_color=SUBTITLE_COLOR,
@@ -153,9 +167,12 @@ class ExclusionPanel(ctk.CTkFrame):
         self._excluded_frame.grid(row=1, column=0, sticky="ew", pady=(4, 0))
         self._excluded_frame.grid_columnconfigure(0, weight=1)
 
+        # ── Outlier bounds (cohort-wide) ──────────────────
+        self._build_outlier_section()
+
         # ── Save + status row ─────────────────────────────
         save_row = ctk.CTkFrame(self, fg_color="transparent")
-        save_row.grid(row=4, column=0, sticky="ew", padx=PAD_X, pady=(PAD_Y, 0))
+        save_row.grid(row=5, column=0, sticky="ew", padx=PAD_X, pady=(PAD_Y, 0))
         save_row.grid_columnconfigure(1, weight=1)
 
         self._save_btn = ctk.CTkButton(
@@ -173,8 +190,9 @@ class ExclusionPanel(ctk.CTkFrame):
 
         # ── Navigation ────────────────────────────────────
         nav = ctk.CTkFrame(self, fg_color="transparent")
-        nav.grid(row=5, column=0, sticky="ew", padx=PAD_X, pady=(PAD_Y, SECTION_PAD_Y))
+        nav.grid(row=6, column=0, sticky="ew", padx=PAD_X, pady=(PAD_Y, SECTION_PAD_Y))
         nav.grid_columnconfigure(0, weight=1)
+        nav.grid_columnconfigure(2, weight=1)
 
         ctk.CTkButton(
             nav, text="Back", width=100, height=BUTTON_HEIGHT,
@@ -183,12 +201,188 @@ class ExclusionPanel(ctk.CTkFrame):
             command=self._handle_back,
         ).grid(row=0, column=0, sticky="w")
 
+        # Reusable "skip this page in future runs" toggle. Persists immediately;
+        # the user stays on the page now and it drops out of the flow next run.
+        self._skip_btn = SkipStepButton(
+            nav, self._controller, "exclusion", on_toggle=self._on_skip_toggled,
+        )
+        self._skip_btn.grid(row=0, column=1, padx=8)
+
         ctk.CTkButton(
             nav, text="Next", width=100, height=BUTTON_HEIGHT,
             corner_radius=CORNER_RADIUS, font=FONT_BUTTON,
             fg_color=ACCENT_COLOR, hover_color=ACCENT_HOVER,
             command=self._handle_next,
-        ).grid(row=0, column=1, sticky="e")
+        ).grid(row=0, column=2, sticky="e")
+
+    # ── Outlier bounds section ────────────────────────────
+
+    def _build_outlier_section(self):
+        section = ctk.CTkFrame(self, fg_color="transparent")
+        section.grid(row=4, column=0, sticky="ew", padx=PAD_X, pady=(SECTION_PAD_Y, 0))
+        section.grid_columnconfigure(0, weight=1)
+
+        header = ctk.CTkFrame(section, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            header, text="Outlier bounds (cohort-wide)", font=FONT_HEADING, anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+
+        self._suggest_all_btn = ctk.CTkButton(
+            header, text="Suggest all (mean ± 2 SD)", width=190, height=28,
+            corner_radius=CORNER_RADIUS, font=FONT_SMALL,
+            fg_color="transparent", hover_color=ACCENT_COLOR,
+            border_width=1, border_color=ACCENT_COLOR, text_color=ACCENT_COLOR,
+            command=self._suggest_all_bounds,
+        )
+        self._suggest_all_btn.grid(row=0, column=1, sticky="e", padx=(0, 8))
+
+        self._clear_bounds_btn = ctk.CTkButton(
+            header, text="Clear bounds", width=110, height=28,
+            corner_radius=CORNER_RADIUS, font=FONT_SMALL,
+            fg_color="transparent", hover_color=ERROR_COLOR,
+            border_width=1, border_color=ERROR_COLOR, text_color=ERROR_COLOR,
+            command=self._clear_bounds,
+        )
+        self._clear_bounds_btn.grid(row=0, column=2, sticky="e")
+
+        ctk.CTkLabel(
+            section,
+            text=(
+                "Set a lower and/or upper cutoff per measure. Any participant-visit "
+                "whose average for that measure falls outside the range is excluded "
+                "from the report averages and blanked in the CSV — for every "
+                "participant. Leave a field blank for no limit."
+            ),
+            font=FONT_SMALL, text_color=SUBTITLE_COLOR, anchor="w",
+            justify="left", wraplength=900,
+        ).grid(row=1, column=0, sticky="w", pady=(2, 6))
+
+        self._bounds_frame = ctk.CTkFrame(section, fg_color="transparent")
+        self._bounds_frame.grid(row=2, column=0, sticky="ew")
+        self._bounds_frame.grid_columnconfigure(0, weight=1)
+
+    def _rebuild_bounds_table(self):
+        for widget in self._bounds_frame.winfo_children():
+            widget.destroy()
+        self._bounds_vars = {}
+        self._bounds_count_labels = {}
+        self._bounds_present = {}
+
+        rows = self._controller.get_outlier_bound_rows()
+
+        for col, text in enumerate(("Measure", "Lower", "Upper", "Excluded")):
+            ctk.CTkLabel(
+                self._bounds_frame, text=text, font=FONT_SMALL,
+                text_color=SUBTITLE_COLOR, anchor=("w" if col == 0 else "center"),
+            ).grid(row=0, column=col, sticky="ew", padx=6, pady=(0, 2))
+
+        self._suppress_bounds_trace = True
+        for r, row in enumerate(rows, start=1):
+            key = row["key"]
+            present = bool(row["present"])
+            self._bounds_present[key] = present
+
+            ctk.CTkLabel(
+                self._bounds_frame, text=row["label"], font=FONT_BODY,
+                text_color=(_NORMAL_TEXT if present else SUBTITLE_COLOR), anchor="w",
+            ).grid(row=r, column=0, sticky="w", padx=6, pady=2)
+
+            lower_var = ctk.StringVar(value=self._fmt_bound(row["lower"]))
+            upper_var = ctk.StringVar(value=self._fmt_bound(row["upper"]))
+            ctk.CTkEntry(
+                self._bounds_frame, textvariable=lower_var, width=90, height=28,
+                corner_radius=CORNER_RADIUS, font=FONT_BODY, justify="center",
+            ).grid(row=r, column=1, padx=6, pady=2)
+            ctk.CTkEntry(
+                self._bounds_frame, textvariable=upper_var, width=90, height=28,
+                corner_radius=CORNER_RADIUS, font=FONT_BODY, justify="center",
+            ).grid(row=r, column=2, padx=6, pady=2)
+
+            count_label = ctk.CTkLabel(
+                self._bounds_frame, text=self._count_text(present, row["excluded_count"]),
+                font=FONT_SMALL, text_color=SUBTITLE_COLOR, width=120, anchor="w",
+            )
+            count_label.grid(row=r, column=3, sticky="w", padx=6, pady=2)
+
+            self._bounds_vars[key] = (lower_var, upper_var)
+            self._bounds_count_labels[key] = count_label
+            lower_var.trace_add("write", lambda *_a, k=key: self._on_bound_changed(k))
+            upper_var.trace_add("write", lambda *_a, k=key: self._on_bound_changed(k))
+        self._suppress_bounds_trace = False
+
+    @staticmethod
+    def _fmt_bound(value) -> str:
+        """Format a stored bound for display; blank when unset."""
+        if value is None:
+            return ""
+        return f"{value:g}"
+
+    @staticmethod
+    def _count_text(present: bool, count: int) -> str:
+        if not present:
+            return "no data"
+        return f"{count} excluded"
+
+    def _set_count_label(self, key: str):
+        label = self._bounds_count_labels.get(key)
+        if label is None:
+            return
+        present = self._bounds_present.get(key, False)
+        count = self._controller.get_outlier_excluded_count(key) if present else 0
+        label.configure(text=self._count_text(present, count))
+
+    def _on_bound_changed(self, key: str):
+        if self._suppress_bounds_trace:
+            return
+        lower_var, upper_var = self._bounds_vars[key]
+        self._controller.set_outlier_bound(
+            key, lower_var.get().strip(), upper_var.get().strip(),
+        )
+        self._set_count_label(key)
+        self._status_var.set("")
+
+    def _suggest_all_bounds(self):
+        applied = 0
+        self._suppress_bounds_trace = True
+        for key, (lower_var, upper_var) in self._bounds_vars.items():
+            if not self._bounds_present.get(key, False):
+                continue
+            lower, upper = self._controller.suggest_outlier_bounds(key)
+            if lower is None and upper is None:
+                continue
+            low_str, up_str = self._fmt_bound(lower), self._fmt_bound(upper)
+            lower_var.set(low_str)
+            upper_var.set(up_str)
+            self._controller.set_outlier_bound(key, low_str, up_str)
+            applied += 1
+        self._suppress_bounds_trace = False
+
+        for key in self._bounds_vars:
+            self._set_count_label(key)
+
+        if applied:
+            self._status_var.set(
+                f"Suggested mean ± 2 SD bounds for {applied} measure(s). Review and "
+                "adjust the values, then Save for future to keep them."
+            )
+        else:
+            self._status_var.set(
+                "Not enough data to suggest bounds (need at least two values per measure)."
+            )
+
+    def _clear_bounds(self):
+        self._controller.clear_outlier_bounds()
+        self._suppress_bounds_trace = True
+        for lower_var, upper_var in self._bounds_vars.values():
+            lower_var.set("")
+            upper_var.set("")
+        self._suppress_bounds_trace = False
+        for key in self._bounds_vars:
+            self._set_count_label(key)
+        self._status_var.set("Cleared all outlier bounds.")
 
     # ── Refresh (called each time page is shown) ──────────
 
@@ -207,6 +401,9 @@ class ExclusionPanel(ctk.CTkFrame):
             "Select a participant on the left to choose which tests to exclude.",
         )
         self._rebuild_excluded_list()
+        self._rebuild_bounds_table()
+        # Keep the skip toggle's label in sync with the saved state.
+        self._skip_btn.refresh()
 
     # ── Participant list ───────────────────────────────────
 
@@ -466,13 +663,35 @@ class ExclusionPanel(ctk.CTkFrame):
 
     def _save_for_future(self):
         self._controller.save_excluded_tests()
+        self._controller.save_outlier_bounds()
         count = len(self._controller.get_excluded_entries())
+        has_bounds = self._controller.has_outlier_bounds()
+        saved_parts = []
         if count:
+            saved_parts.append(f"{count} excluded test(s)")
+        if has_bounds:
+            saved_parts.append("outlier bounds")
+        if saved_parts:
             self._status_var.set(
-                f"Saved {count} excluded test(s) as the default for future sessions."
+                "Saved " + " and ".join(saved_parts)
+                + " as the default for future sessions."
             )
         else:
-            self._status_var.set("Cleared the saved exclusion default.")
+            self._status_var.set("Cleared the saved exclusion and outlier defaults.")
+
+    # ── Skip toggle ────────────────────────────────────────
+
+    def _on_skip_toggled(self, skipped: bool):
+        """Show a confirmation after the skip state is flipped (persisted)."""
+        if skipped:
+            self._status_var.set(
+                "This page will be skipped in future runs. Reach it anytime "
+                "from the page menu at the top of the window."
+            )
+        else:
+            self._status_var.set(
+                "This page will appear in the normal workflow again."
+            )
 
     # ── Navigation ─────────────────────────────────────────
 
