@@ -6,6 +6,8 @@ import threading
 import traceback
 from dataclasses import dataclass
 
+from pathlib import Path
+
 import customtkinter as ctk
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -169,6 +171,9 @@ class VisualizationPanel(ctk.CTkFrame):
         # Status
         self._status_var = ctk.StringVar()
         self._nav_label_var = ctk.StringVar(value="No graphs selected")
+        # Where "Save" writes the figure on screen. Both may be left empty.
+        self._save_dir = ctk.StringVar()
+        self._save_name = ctk.StringVar()
 
         # Arrow key bind IDs
         self._bind_ids: list[str] = []
@@ -299,6 +304,40 @@ class VisualizationPanel(ctk.CTkFrame):
             command=self._save_current_figure,
         )
         self._save_btn.grid(row=0, column=3, padx=(12, 0))
+
+        # Where Save writes. Same arrangement as the Export page: a folder is
+        # enough on its own, and the name box is what overrides the automatic
+        # name (see AppController.resolve_export_target).
+        save_row = ctk.CTkFrame(right, fg_color="transparent")
+        save_row.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        save_row.grid_columnconfigure(1, weight=1)
+        save_row.grid_columnconfigure(4, weight=1)
+
+        ctk.CTkLabel(
+            save_row, text="Folder", font=FONT_SMALL, text_color=SUBTITLE_COLOR,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 4))
+
+        self._save_dir_entry = ctk.CTkEntry(
+            save_row, textvariable=self._save_dir,
+            height=28, corner_radius=CORNER_RADIUS, font=FONT_SMALL,
+        )
+        self._save_dir_entry.grid(row=0, column=1, sticky="ew", padx=(0, 6))
+
+        ctk.CTkButton(
+            save_row, text="Browse", width=70, height=28,
+            corner_radius=CORNER_RADIUS, font=FONT_SMALL,
+            fg_color=ACCENT_COLOR, hover_color=ACCENT_HOVER,
+            command=self._browse_save_dir,
+        ).grid(row=0, column=2, padx=(0, 12))
+
+        ctk.CTkLabel(
+            save_row, text="Name", font=FONT_SMALL, text_color=SUBTITLE_COLOR,
+        ).grid(row=0, column=3, sticky="w", padx=(0, 4))
+
+        ctk.CTkEntry(
+            save_row, textvariable=self._save_name, placeholder_text="optional",
+            height=28, corner_radius=CORNER_RADIUS, font=FONT_SMALL,
+        ).grid(row=0, column=4, sticky="ew")
 
         # Status / error
         ctk.CTkLabel(
@@ -811,23 +850,32 @@ class VisualizationPanel(ctk.CTkFrame):
             self._status_var.set("Figure has not been generated yet.")
             return
 
-        # Offer the study, participant, graph and visit date rather than the
-        # graph label alone, so a saved figure identifies itself later.
-        path = filedialog.asksaveasfilename(
-            title="Save Figure",
-            defaultextension=".png",
-            initialfile=self._controller.default_graph_filename(item.sub_label),
-            initialdir=self._controller.default_export_folder("pdf"),
-            filetypes=[("PNG Image", "*.png"), ("All files", "*.*")],
-        )
-        if not path:
-            return
-
+        # An empty name gets the study, participant, graph and visit date, so a
+        # saved figure identifies itself later; a name typed into the box keeps
+        # the _<Study>_ID<n>_<date> suffix, as on the Export page.
         try:
+            path = Path(self._controller.resolve_export_target(
+                "graph",
+                self._save_dir.get().strip(),
+                self._save_name.get().strip(),
+                item.sub_label,
+            ))
+            path.parent.mkdir(parents=True, exist_ok=True)
             item.figure.savefig(path, dpi=600, bbox_inches="tight")
             self._status_var.set(f"Saved: {path}")
         except Exception as e:
             self._status_var.set(f"Save failed: {e}")
+
+    def _browse_save_dir(self):
+        """Pick the folder figures are saved into."""
+        initial = self._save_dir.get().strip() or self._controller.default_export_folder("graph")
+        chosen = filedialog.askdirectory(
+            title="Choose a folder for saved figures",
+            initialdir=initial or None,
+            mustexist=False,
+        )
+        if chosen:
+            self._save_dir.set(chosen)
 
     # ── Page navigation ────────────────────────────────────
 

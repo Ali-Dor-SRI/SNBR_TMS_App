@@ -29,11 +29,15 @@ class ExportPanel(ctk.CTkFrame):
         self._on_next = on_next
         self._on_back = on_back
 
-        # Checkbox + path state
+        # Checkbox + path state. Folder and file name are separate: a folder on
+        # its own is enough, and the name box is what overrides the automatic
+        # name (see AppController.resolve_export_target).
         self._csv_check = ctk.BooleanVar(value=False)
-        self._csv_path = ctk.StringVar()
+        self._csv_dir = ctk.StringVar()
+        self._csv_name = ctk.StringVar()
         self._pdf_check = ctk.BooleanVar(value=False)
-        self._pdf_path = ctk.StringVar()
+        self._pdf_dir = ctk.StringVar()
+        self._pdf_name = ctk.StringVar()
 
         self._save_csv_default = ctk.BooleanVar(value=False)
         self._save_pdf_default = ctk.BooleanVar(value=False)
@@ -43,9 +47,11 @@ class ExportPanel(ctk.CTkFrame):
 
         self._build_ui()
 
-        # Auto-check when a path is entered
-        self._csv_path.trace_add("write", self._auto_check_csv)
-        self._pdf_path.trace_add("write", self._auto_check_pdf)
+        # Auto-check when either box is filled in
+        self._csv_dir.trace_add("write", self._auto_check_csv)
+        self._csv_name.trace_add("write", self._auto_check_csv)
+        self._pdf_dir.trace_add("write", self._auto_check_pdf)
+        self._pdf_name.trace_add("write", self._auto_check_pdf)
 
     # ── UI ─────────────────────────────────────────────────
 
@@ -70,29 +76,33 @@ class ExportPanel(ctk.CTkFrame):
         rows_frame.grid(row=2, column=0, sticky="ew", padx=PAD_X)
         rows_frame.grid_columnconfigure(0, weight=1)
 
-        self._build_export_row(
+        self._csv_dir_entry = self._build_export_row(
             rows_frame, row=0,
             label="Export DataFrame to CSV",
             helper=(
                 "Saves the working data frame as a .csv file for future use. "
-                "Leave the box empty to name it automatically (df_<date>)."
+                "Leave the file name empty to name it automatically (df_<date>); "
+                "a name you type gets the _<study>_ID<n>_<date> suffix."
             ),
             check_var=self._csv_check,
-            path_var=self._csv_path,
+            dir_var=self._csv_dir,
+            name_var=self._csv_name,
             browse_cmd=self._browse_csv,
             save_var=self._save_csv_default,
         )
 
-        self._build_export_row(
+        self._pdf_dir_entry = self._build_export_row(
             rows_frame, row=1,
             label="Export Report to PDF",
             helper=(
                 "Appends the selected graphs into a single PDF report. "
-                "Leave the box empty to name it automatically "
-                "(report_<study>_<participant>)."
+                "Leave the file name empty to name it automatically "
+                "(report_<study>_<participant>); a name you type gets the "
+                "_<study>_ID<n>_<date> suffix."
             ),
             check_var=self._pdf_check,
-            path_var=self._pdf_path,
+            dir_var=self._pdf_dir,
+            name_var=self._pdf_name,
             browse_cmd=self._browse_pdf,
             save_var=self._save_pdf_default,
         )
@@ -146,7 +156,8 @@ class ExportPanel(ctk.CTkFrame):
 
     def _build_export_row(
         self, parent, row: int, label: str, helper: str,
-        check_var: ctk.BooleanVar, path_var: ctk.StringVar, browse_cmd,
+        check_var: ctk.BooleanVar, dir_var: ctk.StringVar,
+        name_var: ctk.StringVar, browse_cmd,
         save_var: ctk.BooleanVar | None = None,
     ):
         frame = ctk.CTkFrame(parent, fg_color="transparent")
@@ -158,72 +169,116 @@ class ExportPanel(ctk.CTkFrame):
         )
         cb.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
 
-        entry = ctk.CTkEntry(
-            frame, textvariable=path_var,
+        # Folder + Browse
+        ctk.CTkLabel(
+            frame, text="Folder", font=FONT_SMALL, text_color=SUBTITLE_COLOR,
+            anchor="w", width=64,
+        ).grid(row=1, column=0, sticky="w", padx=(26, 4))
+
+        dir_entry = ctk.CTkEntry(
+            frame, textvariable=dir_var,
             height=ENTRY_HEIGHT, corner_radius=CORNER_RADIUS, font=FONT_BODY,
         )
-        entry.grid(row=1, column=0, columnspan=2, sticky="ew", padx=(26, 8))
+        dir_entry.grid(row=1, column=1, sticky="ew", padx=(0, 8))
 
-        browse_btn = ctk.CTkButton(
+        ctk.CTkButton(
             frame, text="Browse", width=90, height=ENTRY_HEIGHT,
             corner_radius=CORNER_RADIUS, font=FONT_BODY,
             fg_color=ACCENT_COLOR, hover_color=ACCENT_HOVER,
             command=browse_cmd,
-        )
-        browse_btn.grid(row=1, column=2, sticky="e")
+        ).grid(row=1, column=2, sticky="e")
+
+        # Optional file name
+        ctk.CTkLabel(
+            frame, text="File name", font=FONT_SMALL, text_color=SUBTITLE_COLOR,
+            anchor="w", width=64,
+        ).grid(row=2, column=0, sticky="w", padx=(26, 4), pady=(4, 0))
+
+        ctk.CTkEntry(
+            frame, textvariable=name_var, placeholder_text="optional",
+            height=ENTRY_HEIGHT, corner_radius=CORNER_RADIUS, font=FONT_BODY,
+        ).grid(row=2, column=1, sticky="ew", padx=(0, 8), pady=(4, 0))
 
         ctk.CTkLabel(
-            frame, text=helper, font=FONT_SUBTITLE, text_color=SUBTITLE_COLOR, anchor="w",
-        ).grid(row=2, column=0, columnspan=3, sticky="w", padx=(26, 0), pady=(2, 0))
+            frame, text=helper, font=FONT_SUBTITLE, text_color=SUBTITLE_COLOR,
+            anchor="w", justify="left", wraplength=620,
+        ).grid(row=3, column=0, columnspan=3, sticky="w", padx=(26, 0), pady=(2, 0))
 
         if save_var is not None:
             ctk.CTkCheckBox(
-                frame, text="Save as default", variable=save_var, font=FONT_SMALL,
-            ).grid(row=3, column=0, columnspan=3, sticky="w", padx=(26, 0), pady=(4, 0))
+                frame, text="Save folder as default", variable=save_var, font=FONT_SMALL,
+            ).grid(row=4, column=0, columnspan=3, sticky="w", padx=(26, 0), pady=(4, 0))
+
+        return dir_entry
 
     # ── Browse dialogs ─────────────────────────────────────
 
-    def _browse_into(self, var, title: str, extension: str, label: str):
-        """Ask for a save path and, if the user picked one, store it in *var*."""
-        path = filedialog.asksaveasfilename(
-            title=title,
-            defaultextension=extension,
-            filetypes=[(label, f"*{extension}"), ("All files", "*.*")],
+    def _browse_folder_into(self, var, title: str):
+        """Ask for a directory and, if the user picked one, store it in *var*."""
+        initial = var.get().strip()
+        chosen = filedialog.askdirectory(
+            title=title, initialdir=initial or None, mustexist=False,
         )
-        if path:
-            var.set(path)
+        if chosen:
+            var.set(chosen)
 
     def _browse_csv(self):
-        self._browse_into(self._csv_path, "Save CSV", ".csv", "CSV files")
+        self._browse_folder_into(self._csv_dir, "Choose a folder for the CSV")
 
     def _browse_pdf(self):
-        self._browse_into(self._pdf_path, "Save PDF", ".pdf", "PDF files")
+        self._browse_folder_into(self._pdf_dir, "Choose a folder for the report")
 
     # ── Auto-check ─────────────────────────────────────────
 
-    # Typing or browsing to a path still ticks its box. Clearing the box no
-    # longer unticks it: an empty path now means "name it for me" rather than
-    # "skip this export", so the tick is the only thing that says what the user
-    # wants. Unticking by hand is how you skip one.
+    # Filling in either box still ticks the export. Clearing them does not
+    # untick it: empty boxes mean "put it in the default folder and name it for
+    # me" rather than "skip this export", so the tick is the only thing that
+    # says what the user wants. Unticking by hand is how you skip one.
     def _auto_check_csv(self, *_args):
-        if self._csv_path.get().strip():
+        if self._csv_dir.get().strip() or self._csv_name.get().strip():
             self._csv_check.set(True)
 
     def _auto_check_pdf(self, *_args):
-        if self._pdf_path.get().strip():
+        if self._pdf_dir.get().strip() or self._pdf_name.get().strip():
             self._pdf_check.set(True)
 
     # ── Refresh ────────────────────────────────────────────
 
+    @staticmethod
+    def _folder_of(saved: str) -> str:
+        """The folder half of a saved default.
+
+        Defaults saved before the folder/name split hold a full file path, so
+        the filename is dropped rather than shown in the Folder box.
+        """
+        saved = (saved or "").strip()
+        if not saved:
+            return ""
+        candidate = Path(saved)
+        return str(candidate if candidate.is_dir() else candidate.parent)
+
     def refresh(self):
-        # Pre-populate from saved defaults (auto-check ticks via trace). Start
-        # from unticked so a page with no saved defaults does not silently
-        # request exports the user never asked for.
+        # Pre-populate the folder from saved defaults (auto-check ticks via
+        # trace). Start from unticked so a page with no saved defaults does not
+        # silently request exports the user never asked for — which is also why
+        # the fallback folder is shown as placeholder text rather than filled
+        # in: it would tick both exports on every visit.
         defaults = self._controller.get_default_export_paths()
         self._csv_check.set(False)
         self._pdf_check.set(False)
-        self._csv_path.set(defaults.get("csv", ""))
-        self._pdf_path.set(defaults.get("pdf", ""))
+        self._csv_dir.set(self._folder_of(defaults.get("csv", "")))
+        self._pdf_dir.set(self._folder_of(defaults.get("pdf", "")))
+        self._csv_name.set("")
+        self._pdf_name.set("")
+        for entry, kind in (
+            (self._csv_dir_entry, "csv"), (self._pdf_dir_entry, "pdf"),
+        ):
+            try:
+                entry.configure(
+                    placeholder_text=self._controller.default_export_folder(kind)
+                )
+            except Exception:
+                pass
         self._save_csv_default.set(False)
         self._save_pdf_default.set(False)
         self._status_var.set("")
@@ -249,11 +304,13 @@ class ExportPanel(ctk.CTkFrame):
             return
 
         errors: list[str] = []
-        csv_path = self._csv_path.get().strip() if csv_checked else ""
-        pdf_path = self._pdf_path.get().strip() if pdf_checked else ""
+        csv_dir = self._csv_dir.get().strip() if csv_checked else ""
+        csv_name = self._csv_name.get().strip() if csv_checked else ""
+        pdf_dir = self._pdf_dir.get().strip() if pdf_checked else ""
+        pdf_name = self._pdf_name.get().strip() if pdf_checked else ""
 
-        # An empty box is fine: the controller names the file from the
-        # participant and date (see reports.export_naming).
+        # Empty boxes are fine: the controller picks the folder and names the
+        # file from the participant and date (see reports.export_naming).
         if pdf_checked and not self._controller.get_report_figures():
             errors.append("No figures available for PDF export.")
 
@@ -268,19 +325,19 @@ class ExportPanel(ctk.CTkFrame):
 
         thread = threading.Thread(
             target=self._export_worker,
-            args=(csv_path, pdf_path, csv_checked, pdf_checked),
+            args=(csv_dir, csv_name, pdf_dir, pdf_name, csv_checked, pdf_checked),
             daemon=True,
         )
         thread.start()
 
     def _export_worker(
-        self, csv_path: str, pdf_path: str,
+        self, csv_dir: str, csv_name: str, pdf_dir: str, pdf_name: str,
         csv_wanted: bool = True, pdf_wanted: bool = True,
     ):
         """Write the checked exports.
 
-        The *wanted* flags carry the checkbox state, because an empty path no
-        longer means "not requested" — it means "name it for me".
+        The *wanted* flags carry the checkbox state, because empty boxes no
+        longer mean "not requested" — they mean "default folder, name it for me".
         """
         results: list[str] = []
         try:
@@ -288,7 +345,9 @@ class ExportPanel(ctk.CTkFrame):
                 df = self._controller.get_export_dataframe()
                 if df is None:
                     raise ValueError("No DataFrame available.")
-                csv_path = self._controller.resolve_export_path("csv", csv_path)
+                csv_path = self._controller.resolve_export_target(
+                    "csv", csv_dir, csv_name,
+                )
                 out = Path(csv_path)
                 out.parent.mkdir(parents=True, exist_ok=True)
                 df.to_csv(out, index=False)
@@ -296,7 +355,10 @@ class ExportPanel(ctk.CTkFrame):
 
             if pdf_wanted:
                 from reports.pdf_renderer import render_figures_to_pdf
-                pdf_path = self._controller.resolve_export_path("pdf", pdf_path)
+                pdf_path = self._controller.resolve_export_target(
+                    "pdf", pdf_dir, pdf_name,
+                )
+                Path(pdf_path).parent.mkdir(parents=True, exist_ok=True)
                 figures = self._controller.get_report_figures()
                 render_figures_to_pdf(figures, pdf_path)
                 self._controller.set_last_exported_pdf(pdf_path)
@@ -311,12 +373,20 @@ class ExportPanel(ctk.CTkFrame):
         self._status_var.set(f"Export complete:\n{msg}")
         self._status_label.configure(text_color=SUCCESS_COLOR)
 
-        # Persist checked export paths as defaults for next session.
+        # Persist the FOLDER only, never the file name: the name is a per-export
+        # choice, and remembering it would bring a stale filename back next run
+        # (and a typed name is not uniquified, so it would overwrite).
+        # The folder actually used is stored, so leaving the box empty and
+        # ticking "save as default" pins whatever folder the export landed in.
         to_save = {}
-        if self._save_csv_default.get() and self._csv_path.get().strip():
-            to_save[KEY_EXPORT_CSV] = self._csv_path.get().strip()
-        if self._save_pdf_default.get() and self._pdf_path.get().strip():
-            to_save[KEY_EXPORT_PDF] = self._pdf_path.get().strip()
+        if self._save_csv_default.get():
+            folder = self._csv_dir.get().strip() or self._controller.default_export_folder("csv")
+            if folder:
+                to_save[KEY_EXPORT_CSV] = folder
+        if self._save_pdf_default.get():
+            folder = self._pdf_dir.get().strip() or self._controller.default_export_folder("pdf")
+            if folder:
+                to_save[KEY_EXPORT_PDF] = folder
         if to_save:
             save_defaults(**to_save)
 

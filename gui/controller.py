@@ -537,6 +537,15 @@ class AppController:
         )
         return f"{stem}.png"
 
+    # Extension per export kind. A graph has no saved-default folder of its own,
+    # so it borrows the report's — which is where figures were already offered.
+    EXPORT_EXTENSIONS = {"csv": ".csv", "pdf": ".pdf", "graph": ".png"}
+    _FOLDER_KIND = {"graph": "pdf"}
+
+    def export_extension(self, kind: str) -> str:
+        """The file extension for one export kind."""
+        return self.EXPORT_EXTENSIONS.get(kind, "")
+
     def default_export_folder(self, kind: str) -> str:
         """Where an unnamed export goes.
 
@@ -545,6 +554,7 @@ class AppController:
         keeps the outputs beside the data they came from; Documents is the last
         resort, never the install directory, which may not be writable.
         """
+        kind = self._FOLDER_KIND.get(kind, kind)
         saved = self.get_default_export_paths().get(kind, "")
         if saved:
             candidate = Path(saved)
@@ -570,6 +580,42 @@ class AppController:
             return self.stamp_export_path(typed)
         folder = Path(self.default_export_folder(kind))
         return str(unique_path(folder / self.default_export_filename(kind)))
+
+    def resolve_export_target(
+        self, kind: str, folder: str = "", name: str = "", graph_label: str = "",
+    ) -> str:
+        """Return the file to write, given a chosen folder and an optional name.
+
+        This is what the export pages call now that the folder and the file name
+        are separate boxes. The two halves are independent:
+
+        * No *folder* — that export type's default folder (see
+          :meth:`default_export_folder`), so the name box alone is enough.
+        * No *name* — the automatic name from :mod:`reports.export_naming`, made
+          unique with ``_2``/``_3`` so re-exporting never destroys the earlier
+          file. Default names already carry study, participant and date, so they
+          are used verbatim and not stamped on top.
+        * A *name* — kept as typed and given the ``_<Study>_ID<n>_<date>`` stamp,
+          exactly as a typed name has always been. A missing extension is filled
+          in, since there is no longer a save dialog to add one.
+
+        *graph_label* names the figure when *kind* is ``"graph"``.
+        """
+        folder = (folder or "").strip()
+        name = (name or "").strip()
+        base = Path(folder) if folder else Path(self.default_export_folder(kind))
+
+        if not name:
+            auto = (
+                self.default_graph_filename(graph_label) if kind == "graph"
+                else self.default_export_filename(kind)
+            )
+            return str(unique_path(base / auto))
+
+        chosen = Path(name)
+        if not chosen.suffix:
+            chosen = chosen.with_suffix(self.export_extension(kind))
+        return self.stamp_export_path(str(base / chosen))
 
     def stamp_export_path(self, path: str) -> str:
         """Insert study, participant ID and date before the file extension.

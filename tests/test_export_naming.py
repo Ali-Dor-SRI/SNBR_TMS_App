@@ -187,8 +187,9 @@ def test_export_page_does_not_reject_an_empty_path():
         encoding="utf-8",
     )
     assert "no path is set" not in source
-    assert 'resolve_export_path("csv"' in source
-    assert 'resolve_export_path("pdf"' in source
+    # The page now hands the folder and the file name over separately.
+    assert 'resolve_export_target(\n                    "csv"' in source
+    assert 'resolve_export_target(\n                    "pdf"' in source
 
 
 def test_clearing_the_box_does_not_untick_the_export():
@@ -198,3 +199,74 @@ def test_clearing_the_box_does_not_untick_the_export():
     )
     assert "self._csv_check.set(bool(" not in source
     assert "self._pdf_check.set(bool(" not in source
+
+
+# --------------------------------------------------------------------------
+# Choosing a folder, with or without a name of your own
+# --------------------------------------------------------------------------
+
+def test_a_chosen_folder_alone_gets_the_default_name(controller, tmp_path):
+    """The point of the folder box: pick where, let the app decide what."""
+    assert Path(controller.resolve_export_target("csv", str(tmp_path))) == (
+        tmp_path / f"{default_dataframe_stem()}.csv"
+    )
+    assert Path(controller.resolve_export_target("pdf", str(tmp_path))) == (
+        tmp_path / "report_SNBR_080.pdf"
+    )
+
+
+def test_a_chosen_folder_plus_a_name_keeps_the_suffix(controller, tmp_path):
+    out = Path(controller.resolve_export_target("pdf", str(tmp_path), "myreport"))
+    assert out == tmp_path / "myreport_SNBR_ID80_20260818.pdf"
+
+
+def test_a_typed_name_gets_the_extension_it_omitted(controller, tmp_path):
+    """There is no save dialog to add it now that the name is a plain box."""
+    for kind, ext in (("csv", ".csv"), ("pdf", ".pdf")):
+        out = Path(controller.resolve_export_target(kind, str(tmp_path), "mine"))
+        assert out.suffix == ext
+    # An extension the user did type is not doubled.
+    out = Path(controller.resolve_export_target("csv", str(tmp_path), "mine.csv"))
+    assert out.name == "mine_SNBR_ID80_20260818.csv"
+
+
+def test_a_name_without_a_folder_uses_the_default_folder(controller, tmp_path):
+    (tmp_path / "df").mkdir()
+    controller._default_export_csv = str(tmp_path / "df")
+    out = Path(controller.resolve_export_target("csv", "", "mine"))
+    assert out.parent == tmp_path / "df"
+
+
+def test_an_auto_named_export_into_a_chosen_folder_is_uniquified(controller, tmp_path):
+    first = Path(controller.resolve_export_target("pdf", str(tmp_path)))
+    first.write_text("x", encoding="utf-8")
+    second = Path(controller.resolve_export_target("pdf", str(tmp_path)))
+    assert second.name == "report_SNBR_080_2.pdf"
+
+
+def test_graphs_follow_the_same_rules_as_the_other_exports(controller, tmp_path):
+    auto = Path(controller.resolve_export_target(
+        "graph", str(tmp_path), "", "T-SICI Profile — Right FDI",
+    ))
+    assert auto == tmp_path / "SNBR_080_T-SICI_Profile_Right_FDI_20260818.png"
+
+    named = Path(controller.resolve_export_target(
+        "graph", str(tmp_path), "figure one", "T-SICI Profile",
+    ))
+    assert named == tmp_path / "figure one_SNBR_ID80_20260818.png"
+
+
+def test_graphs_borrow_the_reports_default_folder(controller, tmp_path):
+    """There is no saved-default key of its own for figures."""
+    (tmp_path / "reports").mkdir()
+    controller._default_export_pdf = str(tmp_path / "reports")
+    assert controller.default_export_folder("graph") == str(tmp_path / "reports")
+
+
+def test_saved_default_holding_an_old_full_path_shows_only_its_folder():
+    """Defaults saved before the split hold a filename; the Folder box drops it."""
+    from gui.export_panel import ExportPanel
+    assert ExportPanel._folder_of("") == ""
+    assert ExportPanel._folder_of(str(Path("C:/out/df/df_20260101.csv"))) == str(
+        Path("C:/out/df")
+    )
