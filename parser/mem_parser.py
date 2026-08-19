@@ -23,6 +23,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from parser._common import (
+    extract_date,
+    extract_int,
+    extract_match,
+    extract_stimulated_cortex,
+    extract_study_and_id,
+    extract_subject_type,
+)
 from parser.handedness import (
     HANDEDNESS_COLUMN,
     HANDEDNESS_LINE_PREFIXES,
@@ -72,8 +80,6 @@ ASICF_BLOCK_MARKER = "!A-SICFvISI(rel)"
 _SECTION_DERIVED = "DERIVED EXCITABILITY VARIABLES"
 _SECTION_EXTRA_VARS = "EXTRA VARIABLES"
 _SECTION_WAVEFORMS = "EXTRA WAVEFORMS"
-
-_STUDY_ID_PATTERN = re.compile(r"([A-Za-z]+)\d*-0*(\d+)", flags=re.IGNORECASE)
 
 _TSICI_GENERIC_PATTERN = re.compile(r"^T-SICI\(70%\)([\d.]+)ms\s*=\s*([-\d.]+)")
 
@@ -157,29 +163,6 @@ def initialize_record() -> dict:
 # Header-field parsing helpers  (replaces parse_common.py, pure-Python)
 # ---------------------------------------------------------------------------
 
-def _extract_study_and_id(text: str | None) -> tuple[str | None, int | None]:
-    """Extract (study_name, participant_id) from text like 'SNBR-005' or 'QUARTS-207'."""
-    if text is None:
-        return None, None
-    match = _STUDY_ID_PATTERN.search(str(text))
-    if match:
-        return match.group(1).upper(), int(match.group(2))
-    return None, None
-
-
-def _extract_date(stripped: str) -> str | None:
-    match = re.search(r"Date:\s+(\d{1,2}/\d{1,2}/\d{2,4})", stripped)
-    if match:
-        raw = match.group(1)
-        for fmt in ("%d/%m/%Y", "%d/%m/%y", "%m/%d/%Y", "%m/%d/%y"):
-            try:
-                parsed = datetime.strptime(raw, fmt)
-                return parsed.strftime("%d/%m/%Y")
-            except ValueError:
-                continue
-    return None
-
-
 _FILENAME_DATE_PATTERN = re.compile(r"C(\d)(\d{2})(\d{2})[A-Z]\.MEM$", flags=re.IGNORECASE)
 
 
@@ -204,39 +187,6 @@ def _extract_date_from_filename(filename: str) -> str | None:
         return None
 
 
-def _extract_int(pattern: str, stripped: str) -> int | None:
-    match = re.search(pattern, stripped)
-    if match:
-        try:
-            return int(match.group(1))
-        except ValueError:
-            pass
-    return None
-
-
-def _extract_match(pattern: str, stripped: str) -> str | None:
-    match = re.search(pattern, stripped)
-    return match.group(1) if match else None
-
-
-def _extract_subject_type(stripped: str) -> str | None:
-    match = re.search(
-        r"Subject type:\s+(Control|Patient)\b", stripped, flags=re.IGNORECASE
-    )
-    return match.group(1).capitalize() if match else None
-
-
-def _extract_stimulated_cortex(stripped: str) -> str | None:
-    # The colon after "Stim/record" is absent in ~44% of files (older Qtrac
-    # export format), so it must be optional here.
-    match = re.search(r"Stim/record:?\s*(.*?)\s*->", stripped)
-    if match:
-        cortex = match.group(1).strip()
-        if cortex:
-            return cortex
-    return None
-
-
 def _extract_tms_coil(stripped: str) -> str | None:
     """Extract the TMS coil model from a 'TMS Coil:' header line.
 
@@ -259,12 +209,12 @@ def _extract_tms_coil(stripped: str) -> str | None:
 
 
 _HEADER_PARSERS: dict[str, tuple[str, Callable] | Callable] = {
-    "Name:": lambda s: _extract_study_and_id(s),  # returns (study, id) — special-cased
-    "Date:": ("Date", _extract_date),
-    "Age:": ("Age", lambda s: _extract_int(r"Age:\s+(\d+)", s)),
-    "Sex:": ("Sex", lambda s: _extract_match(r"Sex:\s+([MF])", s)),
-    "Subject type:": ("Subject_type", _extract_subject_type),
-    "Stim/record": ("Stimulated_cortex", _extract_stimulated_cortex),
+    "Name:": lambda s: extract_study_and_id(s),  # returns (study, id) — special-cased
+    "Date:": ("Date", extract_date),
+    "Age:": ("Age", lambda s: extract_int(r"Age:\s+(\d+)", s)),
+    "Sex:": ("Sex", lambda s: extract_match(r"Sex:\s+([MF])", s)),
+    "Subject type:": ("Subject_type", extract_subject_type),
+    "Stim/record": ("Stimulated_cortex", extract_stimulated_cortex),
     "Muscle:": (MUSCLE_COLUMN, extract_muscle),
     "TMS Coil:": ("TMS_coil", _extract_tms_coil),
 }
@@ -548,7 +498,7 @@ def parse_mem_file(filepath: str | Path) -> dict:
         lines = fh.readlines()
 
     # Attempt to extract study/ID from filename as fallback
-    filename_study, filename_id = _extract_study_and_id(filepath_obj.name)
+    filename_study, filename_id = extract_study_and_id(filepath_obj.name)
 
     record = initialize_record()
     current_section = "header"

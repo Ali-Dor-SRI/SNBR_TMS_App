@@ -45,6 +45,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from parser._common import to_float
+
 # DataFrame / CSV columns holding the two derived strength-duration scalars.
 # These are the only strength-duration values stored on the parsed record --
 # the per-duration points are re-parsed from the source file at plot time.
@@ -87,13 +89,6 @@ _QT_ROW_PATTERN = re.compile(r"^QT\.\d+\b", re.IGNORECASE)
 _DERIVED_ROW_PATTERN = re.compile(r"^\s*(\d+)\.\s+([-\d.]+)")
 
 
-def _to_float(token: str) -> float | None:
-    try:
-        return float(token)
-    except (TypeError, ValueError):
-        return None
-
-
 def _section_bounds(lines: list[str], marker: str) -> tuple[int, int] | None:
     """Return the ``[start, end)`` line span of the section headed by *marker*.
 
@@ -134,7 +129,7 @@ def _parse_derived_scalars(lines: list[str]) -> dict[int, float]:
         if not match:
             continue
         slot = int(match.group(1))
-        value = _to_float(match.group(2))
+        value = to_float(match.group(2))
         if value is not None and slot not in slots:
             slots[slot] = value
     return slots
@@ -181,12 +176,12 @@ def extract_sd_block(lines: list[str]) -> dict:
         # [label, duration, threshold, (optional) charge]
         if len(parts) < 3:
             continue
-        duration = _to_float(parts[1])
-        threshold = _to_float(parts[2])
+        duration = to_float(parts[1])
+        threshold = to_float(parts[2])
         if duration is None or threshold is None:
             continue
 
-        charge = _to_float(parts[3]) if len(parts) > 3 else None
+        charge = to_float(parts[3]) if len(parts) > 3 else None
         if charge is None:
             charge = threshold * duration
 

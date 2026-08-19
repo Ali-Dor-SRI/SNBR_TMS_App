@@ -25,9 +25,9 @@ import warnings
 from datetime import datetime
 from pathlib import Path
 
+from parser._common import extract_study_and_id
 from parser.mem_parser import iter_files, normalize_dirs
 
-_STUDY_ID_PATTERN = re.compile(r"([A-Za-z]+)\d*-0*(\d+)", flags=re.IGNORECASE)
 _VISIT_DATE_PATTERN = re.compile(r"Visit Date:\s*([0-9A-Za-z/:\-\s]+?)\s*$", re.IGNORECASE)
 
 # Date formats seen in source files. First match wins.
@@ -64,16 +64,6 @@ _MUNIX_COLUMN_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
 # ---------------------------------------------------------------------------
 # Shared extraction helpers
 # ---------------------------------------------------------------------------
-
-def _extract_study_and_id(text: str | None) -> tuple[str | None, int | None]:
-    """Extract (study_name, participant_id) using the same regex MEM/CSP use."""
-    if text is None:
-        return None, None
-    match = _STUDY_ID_PATTERN.search(str(text))
-    if match:
-        return match.group(1).upper(), int(match.group(2))
-    return None, None
-
 
 def _parse_visit_date(raw: str | None) -> str | None:
     """Parse a Visit Date string and normalise it to ``dd/mm/YYYY``."""
@@ -329,7 +319,7 @@ def parse_cmap_file(filepath: str | Path) -> dict:
     path = Path(filepath)
     suffix = path.suffix.lower()
 
-    study, pid = _extract_study_and_id(path.stem)
+    study, pid = extract_study_and_id(path.stem)
 
     try:
         if suffix == ".pdf":

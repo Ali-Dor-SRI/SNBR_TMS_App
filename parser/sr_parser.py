@@ -30,6 +30,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from parser._common import to_float
+
 # DataFrame / CSV column holding the reference amplitude (mV).
 SR_MAX_COLUMN = "SR_max_cmap_1ms"
 
@@ -58,13 +60,6 @@ _SR_MAX_PATTERN = re.compile(r"Max\s*CMAP.*?=\s*([-\d.]+)", re.IGNORECASE)
 # Data rows look like "SR.2 \t 2 \t 10.74938". The leading label is a QtracP
 # point id (ignored); columns are % Max then Stimulus(N) in mA.
 _SR_ROW_PATTERN = re.compile(r"^SR\.\d+\b", re.IGNORECASE)
-
-
-def _to_float(token: str) -> float | None:
-    try:
-        return float(token)
-    except (TypeError, ValueError):
-        return None
 
 
 def extract_sr_block(lines: list[str]) -> dict:
@@ -112,7 +107,7 @@ def extract_sr_block(lines: list[str]) -> dict:
         if max_cmap_1ms is None:
             max_match = _SR_MAX_PATTERN.search(stripped)
             if max_match:
-                max_cmap_1ms = _to_float(max_match.group(1))
+                max_cmap_1ms = to_float(max_match.group(1))
                 continue
 
         if not _SR_ROW_PATTERN.match(stripped):
@@ -122,8 +117,8 @@ def extract_sr_block(lines: list[str]) -> dict:
         # [label, percent_max, stimulus]
         if len(parts) < 3:
             continue
-        percent_max = _to_float(parts[1])
-        stimulus_ma = _to_float(parts[-1])
+        percent_max = to_float(parts[1])
+        stimulus_ma = to_float(parts[-1])
         if percent_max is None or stimulus_ma is None:
             continue
 
