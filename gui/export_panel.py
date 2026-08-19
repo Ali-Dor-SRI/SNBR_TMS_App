@@ -183,23 +183,21 @@ class ExportPanel(ctk.CTkFrame):
 
     # ── Browse dialogs ─────────────────────────────────────
 
-    def _browse_csv(self):
+    def _browse_into(self, var, title: str, extension: str, label: str):
+        """Ask for a save path and, if the user picked one, store it in *var*."""
         path = filedialog.asksaveasfilename(
-            title="Save CSV",
-            defaultextension=".csv",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            title=title,
+            defaultextension=extension,
+            filetypes=[(label, f"*{extension}"), ("All files", "*.*")],
         )
         if path:
-            self._csv_path.set(path)
+            var.set(path)
+
+    def _browse_csv(self):
+        self._browse_into(self._csv_path, "Save CSV", ".csv", "CSV files")
 
     def _browse_pdf(self):
-        path = filedialog.asksaveasfilename(
-            title="Save PDF",
-            defaultextension=".pdf",
-            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
-        )
-        if path:
-            self._pdf_path.set(path)
+        self._browse_into(self._pdf_path, "Save PDF", ".pdf", "PDF files")
 
     # ── Auto-check ─────────────────────────────────────────
 

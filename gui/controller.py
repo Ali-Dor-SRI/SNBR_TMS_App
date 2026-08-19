@@ -1295,6 +1295,14 @@ class AppController:
     def get_selected_cortex(self) -> str | list[str] | None:
         return getattr(self, "_selected_cortex", None)
 
+    def _require_dataframe(self, df: pd.DataFrame | None = None) -> pd.DataFrame:
+        """Return *df*, falling back to the loaded frame; raise if there is none."""
+        if df is None:
+            df = self._dataframe
+        if df is None:
+            raise ValueError("No DataFrame available.")
+        return df
+
     def _get_cortex_filtered_df(
         self, cortex_value: str | None = None, df: pd.DataFrame | None = None,
     ) -> pd.DataFrame:
@@ -1302,10 +1310,7 @@ class AppController:
 
         If *cortex_value* is None, returns the frame unfiltered.
         """
-        if df is None:
-            df = self._dataframe
-        if df is None:
-            raise ValueError("No DataFrame available.")
+        df = self._require_dataframe(df)
         if cortex_value is None or "Stimulated_cortex" not in df.columns:
             return df
         return df[
@@ -1364,10 +1369,7 @@ class AppController:
         they hold visit-level data (CMAP/MUNIX tables) that belongs to the
         visit rather than to one muscle.
         """
-        if df is None:
-            df = self._dataframe
-        if df is None:
-            raise ValueError("No DataFrame available.")
+        df = self._require_dataframe(df)
         pid, _date = self.get_selected_participant()
         return restrict_participant_to_target(df, pid, target)
 
@@ -1379,10 +1381,7 @@ class AppController:
         Both recorded sides are kept, so a visit tested on each hemisphere
         overlays its two traces on one figure instead of splitting into two.
         """
-        if df is None:
-            df = self._dataframe
-        if df is None:
-            raise ValueError("No DataFrame available.")
+        df = self._require_dataframe(df)
         pid, _date = self.get_selected_participant()
         return restrict_participant_to_muscle(df, pid, muscle)
 
@@ -1462,9 +1461,7 @@ class AppController:
         ``plot_mem_graph``, so the target filter has to be applied for them
         here rather than via a ``data_df`` keyword.
         """
-        df = self._dataframe
-        if df is None:
-            raise ValueError("No DataFrame available.")
+        df = self._require_dataframe()
         targets = self.get_selected_targets()
         if len(targets) == 1:
             return self._get_target_filtered_df(targets[0], df=df)
@@ -1798,9 +1795,7 @@ class AppController:
         pid, date = self.get_selected_participant()
         if pid is None or date is None:
             raise ValueError("No participant/date selected.")
-        df = self._dataframe
-        if df is None:
-            raise ValueError("No DataFrame available.")
+        df = self._require_dataframe()
 
         date_str = date.strftime(self._DATE_FMT)
         rows = df[

@@ -515,31 +515,30 @@ class TMSApp(ctk.CTk):
         self.bind_all("<Control-n>", self._on_key_nav_next)
         self.bind_all("<Control-N>", self._on_key_nav_next)
 
-    def _on_key_nav_back(self, event):
-        """Trigger the current page's Back action — prefer ``_handle_back``
-        (which may run backend work like saving defaults) and fall back to
-        the plain navigation callback ``_on_back`` when no handler exists.
+    def _fire_page_handler(self, preferred: str, fallback: str):
+        """Run the current page's *preferred* handler, else its *fallback*.
+
         Returns ``"break"`` so Entry widgets don't also consume the key.
         """
         page = self._pages.get(self._current_page)
         if page is not None:
-            handler = getattr(page, "_handle_back", None) or getattr(
-                page, "_on_back", None
+            handler = getattr(page, preferred, None) or getattr(
+                page, fallback, None
             )
             if callable(handler):
                 handler()
         return "break"
+
+    def _on_key_nav_back(self, event):
+        """Trigger the current page's Back action — prefer ``_handle_back``
+        (which may run backend work like saving defaults) and fall back to
+        the plain navigation callback ``_on_back`` when no handler exists.
+        """
+        return self._fire_page_handler("_handle_back", "_on_back")
 
     def _on_key_nav_next(self, event):
         """Trigger the current page's Next action — prefer ``_handle_next``
         (which runs validation / parsing / CSV load before navigating) and
         fall back to ``_on_next`` when no handler exists.
         """
-        page = self._pages.get(self._current_page)
-        if page is not None:
-            handler = getattr(page, "_handle_next", None) or getattr(
-                page, "_on_next", None
-            )
-            if callable(handler):
-                handler()
-        return "break"
+        return self._fire_page_handler("_handle_next", "_on_next")
