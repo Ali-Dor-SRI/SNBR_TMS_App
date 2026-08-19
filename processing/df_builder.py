@@ -105,6 +105,15 @@ def _split_source_files(value) -> list[str]:
     return [n.strip() for n in str(value).split(";") if n.strip()]
 
 
+def _clean_text(series: pd.Series) -> pd.Series:
+    """Trimmed string form of a column, with missing values as empty strings.
+
+    The match/group keys are built from this, so NA must become ``""`` rather
+    than propagate — an NA key would compare unequal to itself.
+    """
+    return series.astype("string").fillna("").str.strip()
+
+
 # ---------------------------------------------------------------------------
 # Recompute helpers
 # ---------------------------------------------------------------------------
@@ -155,51 +164,58 @@ def _recompute_csp_durations(df: pd.DataFrame) -> pd.DataFrame:
 # Normalisation (column typing, ordering, derived columns)
 # ---------------------------------------------------------------------------
 
-def _normalize_mem_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Align a DataFrame to the full MEM output schema."""
+def _align_to_schema(
+    df: pd.DataFrame, columns: list[str], numeric_columns
+) -> pd.DataFrame:
+    """Copy *df*, add any missing schema column as NaN, and coerce the numerics."""
     norm = df.copy()
-    for col in output_column_order():
+    for col in columns:
         if col not in norm.columns:
             norm[col] = np.nan
-    for col in NUMERIC_OUTPUT_COLUMNS:
+    for col in numeric_columns:
         if col in norm.columns:
             norm[col] = pd.to_numeric(norm[col], errors="coerce")
-    norm = norm[output_column_order()]
-    norm = _recompute_waveform_averages(norm)
-    norm = _recompute_csp_durations(norm)
+    return norm
+
+
+def _sorted_by_id_and_source(norm: pd.DataFrame) -> pd.DataFrame:
+    """The stable row order every normalised DataFrame ends in."""
     return (
         norm.sort_values(["ID", "source_file"], na_position="last")
         .reset_index(drop=True)
     )
+
+
+def _normalize_mem_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Align a DataFrame to the full MEM output schema."""
+    norm = _align_to_schema(df, output_column_order(), NUMERIC_OUTPUT_COLUMNS)
+    norm = norm[output_column_order()]
+    norm = _recompute_waveform_averages(norm)
+    norm = _recompute_csp_durations(norm)
+    return _sorted_by_id_and_source(norm)
 
 
 def _normalize_csp_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """Align a DataFrame to the CSP output schema."""
-    norm = df.copy()
-    for col in csp_output_columns():
-        if col not in norm.columns:
-            norm[col] = np.nan
-    for col in CSP_NUMERIC_COLUMNS:
-        if col in norm.columns:
-            norm[col] = pd.to_numeric(norm[col], errors="coerce")
+    norm = _align_to_schema(df, csp_output_columns(), CSP_NUMERIC_COLUMNS)
+    # Durations are recomputed BEFORE the column selection here and after it in
+    # the MEM path above. Left as they were: swapping them is a behaviour
+    # question, not a formatting one.
     norm = _recompute_csp_durations(norm)
     norm = norm[csp_output_columns()]
-    return (
-        norm.sort_values(["ID", "source_file"], na_position="last")
-        .reset_index(drop=True)
-    )
+    return _sorted_by_id_and_source(norm)
 
 
 # ---------------------------------------------------------------------------
 # Build DataFrames from parser output
 # ---------------------------------------------------------------------------
 
+# An empty *records* needs no special case: pd.DataFrame([], columns=cols) and
+# pd.DataFrame(columns=cols) produce the same values and the same dtypes, for
+# both schemas, before and after normalisation.
+
 def build_mem_dataframe(records: list[dict]) -> pd.DataFrame:
     """Convert a list of parsed MEM record dicts into a normalised DataFrame."""
-    if not records:
-        return _normalize_mem_dataframe(
-            pd.DataFrame(columns=output_column_order())
-        )
     return _normalize_mem_dataframe(
         pd.DataFrame(records, columns=output_column_order())
     )
@@ -207,10 +223,6 @@ def build_mem_dataframe(records: list[dict]) -> pd.DataFrame:
 
 def build_csp_dataframe(records: list[dict]) -> pd.DataFrame:
     """Convert a list of parsed CSP record dicts into a normalised DataFrame."""
-    if not records:
-        return _normalize_csp_dataframe(
-            pd.DataFrame(columns=csp_output_columns())
-        )
     return _normalize_csp_dataframe(
         pd.DataFrame(records, columns=csp_output_columns())
     )
@@ -284,9 +296,7 @@ def merge_csp_into_mem(
 
     for frame in (main_work, csp_work):
         frame["_match_id"] = pd.to_numeric(frame["ID"], errors="coerce")
-        frame["_match_date"] = (
-            frame["Date"].astype("string").fillna("").str.strip()
-        )
+        frame["_match_date"] = _clean_text(frame["Date"])
         frame["_match_token"] = frame["source_file"].apply(_acquisition_token)
 
     matched_pairs: list[tuple[int, int]] = []
@@ -409,14 +419,10 @@ def merge_cmap_into_mem(
     if "MUNIX_table" not in cmap_work.columns:
         cmap_work["MUNIX_table"] = None
     cmap_work["_match_id"] = pd.to_numeric(cmap_work["ID"], errors="coerce")
-    cmap_work["_match_date"] = (
-        cmap_work["Date"].astype("string").fillna("").str.strip()
-    )
+    cmap_work["_match_date"] = _clean_text(cmap_work["Date"])
 
     main_work["_match_id"] = pd.to_numeric(main_work["ID"], errors="coerce")
-    main_work["_match_date"] = (
-        main_work["Date"].astype("string").fillna("").str.strip()
-    )
+    main_work["_match_date"] = _clean_text(main_work["Date"])
 
     matched_cmap: set[int] = set()
     merged_rows = 0
@@ -657,9 +663,7 @@ def restrict_participant_to_muscle(
     if not muscle or MUSCLE_COLUMN not in df.columns or participant_id is None:
         return df
     wanted = str(muscle).strip().upper()
-    muscles = (
-        df[MUSCLE_COLUMN].astype("string").fillna("").str.strip().str.upper()
-    )
+    muscles = _clean_text(df[MUSCLE_COLUMN]).str.upper()
     is_participant = pd.to_numeric(df["ID"], errors="coerce") == participant_id
     return df[~is_participant | (muscles == wanted) | (muscles == "")]
 
@@ -706,7 +710,7 @@ def _coalesce_same_session_rows(df: pd.DataFrame) -> pd.DataFrame:
 
     work = df.copy()
     work["_g_id"] = pd.to_numeric(work["ID"], errors="coerce")
-    work["_g_date"] = work["Date"].astype("string").fillna("").str.strip()
+    work["_g_date"] = _clean_text(work["Date"])
     groupable = work["_g_id"].notna() & work["_g_date"].ne("")
     keyed = work[groupable]
     unkeyed = work[~groupable].drop(columns=["_g_id", "_g_date"])
