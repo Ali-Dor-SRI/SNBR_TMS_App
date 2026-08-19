@@ -12,6 +12,7 @@ from gui.theme import (
     ACCENT_COLOR, ACCENT_HOVER, ERROR_COLOR, SUCCESS_COLOR, DISABLED_FG, SUBTITLE_COLOR,
     PAD_X, PAD_Y, SECTION_PAD_Y, ENTRY_HEIGHT, BUTTON_HEIGHT, CORNER_RADIUS,
 )
+from gui.page_shell import resolve_footer
 
 
 def _split_addrs(raw: str) -> list[str]:
@@ -23,14 +24,8 @@ class EmailPanel(ctk.CTkFrame):
 
     def __init__(self, parent, controller, on_next, on_back, footer=None):
         super().__init__(parent, fg_color="transparent")
-        # The pinned bar at the bottom of the window (gui.page_shell.PageShell).
-        # Panels grid their Back/Next, action buttons, progress bar and status
-        # line into it so those never scroll away with the content. Falling back
-        # to a row of its own keeps a panel constructible standalone.
-        self._footer = footer
-        if self._footer is None:
-            self._footer = ctk.CTkFrame(self, fg_color="transparent")
-            self._footer.grid(row=99, column=0, sticky="ew")
+        # The pinned bar at the bottom of the window; see gui.page_shell.
+        self._footer = resolve_footer(self, footer)
         self._controller = controller
         self._on_next = on_next
         self._on_back = on_back

@@ -99,3 +99,18 @@ class PageShell(ctk.CTkFrame):
 FOOTER_ROW_PROGRESS = 0
 FOOTER_ROW_STATUS = 1
 FOOTER_ROW_NAV = 2
+
+
+def resolve_footer(panel, footer):
+    """Return the frame *panel* should grid its Back/Next bar into.
+
+    ``gui.app`` hands every panel the shell's pinned footer. A panel built
+    without one — in a test, or standalone — falls back to a bar of its own at
+    the bottom of itself, which is what the pages did before the shell existed.
+    Row 99 keeps that fallback below whatever content rows the panel grids.
+    """
+    if footer is not None:
+        return footer
+    own = ctk.CTkFrame(panel, fg_color="transparent")
+    own.grid(row=99, column=0, sticky="ew")
+    return own

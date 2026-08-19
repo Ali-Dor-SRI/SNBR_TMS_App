@@ -53,10 +53,15 @@ def test_nav_row_is_built_in_the_footer_not_the_page(filename):
 
 @pytest.mark.parametrize("filename", PANELS_WITH_NAV)
 def test_panel_accepts_a_footer_and_falls_back_to_its_own(filename):
-    """The footer is injected by the app, but a panel must still stand alone."""
+    """The footer is injected by the app, but a panel must still stand alone.
+
+    The fallback itself now lives in ``page_shell.resolve_footer`` rather than
+    being open-coded in all twelve panels; what this still guards is that every
+    panel takes an injected footer and routes it through that one helper.
+    """
     source = _source(filename)
     assert "footer=None" in source
-    assert "self._footer = footer" in source
+    assert "self._footer = resolve_footer(self, footer)" in source
 
 
 @pytest.mark.parametrize("filename", PANELS_WITH_NAV)
