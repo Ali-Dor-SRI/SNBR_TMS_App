@@ -13,9 +13,12 @@ parse_mem_directory(input_dir) -> list[dict]
 
 from __future__ import annotations
 
+import fnmatch
 import json
+import os
 import re
 import warnings
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -652,6 +655,185 @@ def normalize_dirs(value) -> list[Path]:
     return result
 
 
+def _folder_key(path: str | Path) -> str:
+    """Return the normalised absolute string used to recognise *path* twice.
+
+    ``os.path.realpath`` is what collapses two spellings of the same folder —
+    a junction, a second mapping of the share, an 8.3 short name — onto one
+    key, and it is only ever called on the handful of *roots* (and excluded
+    folders) a scan is given.  Resolving every discovered file instead is what
+    made the old implementation spend 23s of a 25s scan inside
+    ``nt._getfinalpathname`` on the lab's Y: share.
+    """
+    try:
+        return os.path.normcase(os.path.realpath(path))
+    except (OSError, ValueError):
+        return os.path.normcase(os.path.abspath(path))
+
+
+def _is_within(key: str, folder_keys: list[str]) -> bool:
+    """True when *key* is one of *folder_keys* or sits inside one.
+
+    Both sides are already normalised by :func:`_folder_key`, so this is the
+    string form of the old ``resolved == ex or ex in resolved.parents`` test.
+    The separator keeps ``CSP_extra`` from counting as inside ``CSP``.
+    """
+    for folder in folder_keys:
+        if key == folder or key.startswith(folder.rstrip(os.sep) + os.sep):
+            return True
+    return False
+
+
+def _same_file(first: str | Path, second: str | Path) -> bool:
+    """True when two different paths are provably the same file on disk."""
+    try:
+        a = os.stat(first)
+        b = os.stat(second)
+    except OSError:
+        return False
+    if a.st_ino and b.st_ino and a.st_dev and b.st_dev:
+        return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+    # Network shares can report a zero inode; fall back to the expensive
+    # comparison for that (rare) case alone.
+    return _folder_key(first) == _folder_key(second)
+
+
+def _scandir_entries(directory: Path) -> list[os.DirEntry]:
+    """List *directory* via ``os.scandir``, sorted by name.
+
+    Returns an empty list for a folder that is missing (a path the user typed
+    wrong) or unreadable (a permission error on the share) rather than
+    raising, which is how the previous ``glob``-based scan behaved.
+    """
+    try:
+        with os.scandir(directory) as scan:
+            entries = list(scan)
+    except (OSError, ValueError):
+        return []
+    entries.sort(key=lambda e: e.name)
+    return entries
+
+
+def _name_matcher(pattern: str) -> Callable[[str], bool]:
+    """Return a predicate matching a *filename* against *pattern*.
+
+    ``fnmatch`` is case-insensitive on Windows and case-sensitive elsewhere,
+    which is exactly what ``Path.glob`` did with the same pattern.
+    """
+    if pattern == "*":
+        return lambda name: True
+    return lambda name: fnmatch.fnmatch(name, pattern)
+
+
+def _walk_candidates(root: Path, root_key: str, matches, recursive: bool,
+                     exclude_keys: list[str]):
+    """Yield ``(path, key, entry)`` for files under *root* matching the name test.
+
+    A directory that is a link is not descended into, matching ``Path.rglob``
+    (which skips symlinks/junctions) — so a junction pointing back into the
+    tree cannot loop.  Excluded folders are pruned here rather than filtered
+    afterwards, which keeps the whole CSP subtree off the wire during a MEM
+    scan.
+    """
+    queue = deque([(root, root_key)])
+    while queue:
+        directory, dir_key = queue.popleft()
+        for entry in _scandir_entries(directory):
+            entry_key = os.path.join(dir_key, os.path.normcase(entry.name))
+            try:
+                is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                is_dir = False
+            if is_dir:
+                if recursive and not _is_within(entry_key, exclude_keys):
+                    queue.append((directory / entry.name, entry_key))
+                continue
+            if not matches(entry.name) or _is_within(entry_key, exclude_keys):
+                continue
+            try:
+                if not entry.is_file():
+                    continue
+            except OSError:
+                continue
+            yield directory / entry.name, entry_key, entry
+
+
+def _glob_candidates(root: Path, pattern: str, recursive: bool,
+                     exclude_keys: list[str]):
+    """Yield ``(path, key, None)`` — fallback for patterns spanning folders.
+
+    No caller passes one today (the app uses ``"*.MEM"`` and ``"*"``), but the
+    *pattern* argument has always accepted e.g. ``"sub/*.MEM"``, which a
+    filename test cannot express.  Correctness over speed here: this path
+    resolves each hit, exactly as the whole function used to.
+    """
+    glob_iter = root.rglob(pattern) if recursive else root.glob(pattern)
+    for path in sorted(glob_iter):
+        if not path.is_file():
+            continue
+        key = _folder_key(path)
+        if _is_within(key, exclude_keys):
+            continue
+        yield path, key, None
+
+
+def _collect_files(
+    input_dir: str | Path | list[str | Path] | None,
+    pattern: str,
+    recursive: bool,
+    exclude_dirs: list[str | Path | None] | None = None,
+) -> list[Path]:
+    """Shared discovery engine behind :func:`iter_files` / :func:`iter_mem_files`."""
+    exclude_keys = [_folder_key(d) for d in normalize_dirs(exclude_dirs)]
+    matches = _name_matcher(pattern)
+    spans_dirs = "**" in pattern or "/" in pattern or "\\" in pattern
+
+    files: list[Path] = []
+    seen_keys: set[str] = set()
+    seen_attrs: dict[tuple, list[Path]] = {}
+
+    for root in normalize_dirs(input_dir):
+        root_key = _folder_key(root)
+        if _is_within(root_key, exclude_keys) or not root.is_dir():
+            continue
+        if spans_dirs:
+            candidates = _glob_candidates(root, pattern, recursive, exclude_keys)
+        else:
+            candidates = _walk_candidates(
+                root, root_key, matches, recursive, exclude_keys,
+            )
+        for path, key, entry in candidates:
+            if key in seen_keys:
+                continue
+            if _seen_as_another_path(path, entry, seen_attrs):
+                continue
+            seen_keys.add(key)
+            files.append(path)
+    return sorted(files, key=lambda p: str(p))
+
+
+def _seen_as_another_path(path: Path, entry, seen_attrs: dict) -> bool:
+    """True when *path* is a file already listed under a different name.
+
+    ``Path.resolve()`` used to collapse those (a root reached through a
+    junction, the same share mapped twice) at the cost of a round-trip per
+    file.  The stand-in is the ``(name, size, mtime)`` the directory scan
+    already carries for free; because that trio can also collide for two
+    genuinely different recordings, a collision is confirmed against the
+    file's identity before anything is dropped.
+    """
+    try:
+        stat = entry.stat() if entry is not None else os.stat(path)
+    except OSError:
+        return False
+    key = (os.path.normcase(path.name), stat.st_size, stat.st_mtime_ns)
+    twins = seen_attrs.setdefault(key, [])
+    if any(_same_file(path, other) for other in twins):
+        return True
+    twins.append(path)
+    return False
+
+
 def iter_files(
     input_dir: str | Path | list[str | Path] | None,
     pattern: str = "*.MEM",
@@ -663,27 +845,15 @@ def iter_files(
     directories, so callers can collect files stored in several locations.
     When *recursive* is ``True`` (default), subfolders are searched too;
     when ``False``, only files directly inside each root are returned.
-    Results are de-duplicated by resolved path (overlapping/parent+child
-    selections are not returned twice) and missing directories are skipped.
+    Results are de-duplicated (overlapping/parent+child selections are not
+    returned twice — the lab's CSP folder sits inside the MEM folder) and
+    missing or unreadable directories are skipped.
+
+    The walk is ``os.scandir``-based and de-duplicates on the normalised path
+    instead of ``Path.resolve()``: this runs on every load, over a network
+    share, and per-file resolution cost ~23s of a 25s scan there.
     """
-    files: list[Path] = []
-    seen: set[Path] = set()
-    for root in normalize_dirs(input_dir):
-        if not root.is_dir():
-            continue
-        glob_iter = root.rglob(pattern) if recursive else root.glob(pattern)
-        for path in sorted(glob_iter):
-            if not path.is_file():
-                continue
-            try:
-                resolved = path.resolve()
-            except OSError:
-                resolved = path
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            files.append(path)
-    return sorted(files, key=lambda p: str(p))
+    return _collect_files(input_dir, pattern, recursive)
 
 
 def iter_mem_files(
@@ -697,33 +867,13 @@ def iter_mem_files(
     are collected from all of them so the user can pull MEM files stored in
     different locations.  When *recursive* is ``True`` (default), subfolders
     are searched too; when ``False``, only files directly inside each root
-    are returned.  Files are de-duplicated by resolved path (overlapping
-    selections won't be parsed twice), and any file inside one of
-    *exclude_dirs* is skipped — used to keep the CSP directory (a subfolder
-    of the MEM directory in typical lab layouts) out of the MEM parse,
-    since CSP files use a different format handled by ``CSP_parser``.
+    are returned.  Files are de-duplicated (overlapping selections won't be
+    parsed twice), and any file inside one of *exclude_dirs* is skipped —
+    used to keep the CSP directory (a subfolder of the MEM directory in
+    typical lab layouts) out of the MEM parse, since CSP files use a
+    different format handled by ``CSP_parser``.
     """
-    mem_files = iter_files(input_dir, "*.MEM", recursive=recursive)
-
-    excluded: list[Path] = []
-    for d in normalize_dirs(exclude_dirs):
-        try:
-            excluded.append(d.resolve())
-        except OSError:
-            excluded.append(d)
-    if not excluded:
-        return mem_files
-
-    kept: list[Path] = []
-    for path in mem_files:
-        try:
-            resolved = path.resolve()
-        except OSError:
-            resolved = path
-        if any(resolved == ex or ex in resolved.parents for ex in excluded):
-            continue
-        kept.append(path)
-    return kept
+    return _collect_files(input_dir, "*.MEM", recursive, exclude_dirs=exclude_dirs)
 
 
 def parse_mem_directory(
