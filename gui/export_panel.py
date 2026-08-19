@@ -191,11 +191,11 @@ class ExportPanel(ctk.CTkFrame):
         # Optional file name
         ctk.CTkLabel(
             frame, text="File name", font=FONT_SMALL, text_color=SUBTITLE_COLOR,
-            anchor="w", width=64,
+            anchor="w", width=72,
         ).grid(row=2, column=0, sticky="w", padx=(26, 4), pady=(4, 0))
 
         ctk.CTkEntry(
-            frame, textvariable=name_var, placeholder_text="optional",
+            frame, textvariable=name_var,
             height=ENTRY_HEIGHT, corner_radius=CORNER_RADIUS, font=FONT_BODY,
         ).grid(row=2, column=1, sticky="ew", padx=(0, 8), pady=(4, 0))
 
@@ -260,9 +260,12 @@ class ExportPanel(ctk.CTkFrame):
     def refresh(self):
         # Pre-populate the folder from saved defaults (auto-check ticks via
         # trace). Start from unticked so a page with no saved defaults does not
-        # silently request exports the user never asked for — which is also why
-        # the fallback folder is shown as placeholder text rather than filled
-        # in: it would tick both exports on every visit.
+        # silently request exports the user never asked for, which is also why
+        # the computed fallback folder is NOT filled in here: doing so would tick
+        # both exports on every visit. Where an empty box lands is spelled out in
+        # the helper line under each row instead. (A CTkEntry placeholder cannot
+        # carry it: CTkEntry._activate_placeholder only fires when the entry has
+        # no textvariable, and these are bound to one.)
         defaults = self._controller.get_default_export_paths()
         self._csv_check.set(False)
         self._pdf_check.set(False)
@@ -270,15 +273,6 @@ class ExportPanel(ctk.CTkFrame):
         self._pdf_dir.set(self._folder_of(defaults.get("pdf", "")))
         self._csv_name.set("")
         self._pdf_name.set("")
-        for entry, kind in (
-            (self._csv_dir_entry, "csv"), (self._pdf_dir_entry, "pdf"),
-        ):
-            try:
-                entry.configure(
-                    placeholder_text=self._controller.default_export_folder(kind)
-                )
-            except Exception:
-                pass
         self._save_csv_default.set(False)
         self._save_pdf_default.set(False)
         self._status_var.set("")

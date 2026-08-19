@@ -331,11 +331,11 @@ class VisualizationPanel(ctk.CTkFrame):
         ).grid(row=0, column=2, padx=(0, 12))
 
         ctk.CTkLabel(
-            save_row, text="Name", font=FONT_SMALL, text_color=SUBTITLE_COLOR,
+            save_row, text="Name (optional)", font=FONT_SMALL, text_color=SUBTITLE_COLOR,
         ).grid(row=0, column=3, sticky="w", padx=(0, 4))
 
         ctk.CTkEntry(
-            save_row, textvariable=self._save_name, placeholder_text="optional",
+            save_row, textvariable=self._save_name,
             height=28, corner_radius=CORNER_RADIUS, font=FONT_SMALL,
         ).grid(row=0, column=4, sticky="ew")
 
