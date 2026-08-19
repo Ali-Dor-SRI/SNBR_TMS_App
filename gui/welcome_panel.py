@@ -8,11 +8,12 @@ from pathlib import Path
 
 import customtkinter as ctk
 from gui.theme import (
-    FONT_TITLE, FONT_HEADING, FONT_SMALL, FONT_SUBTITLE, FONT_BUTTON,
+    FONT_TITLE, FONT_SMALL, FONT_SUBTITLE, FONT_BUTTON,
     ACCENT_COLOR, ACCENT_HOVER, ERROR_COLOR, SUCCESS_COLOR, DISABLED_FG, SUBTITLE_COLOR,
     PAD_X, PAD_Y, BUTTON_HEIGHT, CORNER_RADIUS,
 )
 from gui.page_shell import resolve_footer
+from gui.widgets import add_summary_section
 
 
 class WelcomePanel(ctk.CTkFrame):
@@ -207,7 +208,7 @@ class WelcomePanel(ctk.CTkFrame):
         pid_text = f"{study_label}ID {s['pid']}  |  {s['date']}"
         cortex_text = ", ".join(s["cortex"]) if s["cortex"] else "N/A"
 
-        row = self._add_section(scroll, row, "Participant", [
+        row = add_summary_section(scroll, row, "Participant", [
             f"ID: {pid_text}",
             f"Cortex: {cortex_text}",
         ])
@@ -224,12 +225,12 @@ class WelcomePanel(ctk.CTkFrame):
             path_lines.append(f"CSV Export: {s['csv_export']}")
         if s["pdf_export"]:
             path_lines.append(f"PDF Export: {s['pdf_export']}")
-        row = self._add_section(scroll, row, "Paths", path_lines)
+        row = add_summary_section(scroll, row, "Paths", path_lines)
 
         # Graphs
         graph_lines = [f"{i+1}. {g}" for i, g in enumerate(s["graphs"])]
         graph_lines.append(f"Total figures: {s['figure_count']}")
-        row = self._add_section(scroll, row, "Graphs in Report", graph_lines)
+        row = add_summary_section(scroll, row, "Graphs in Report", graph_lines)
 
         # REDCap Export
         rc = s.get("redcap_summary")
@@ -250,7 +251,7 @@ class WelcomePanel(ctk.CTkFrame):
                     redcap_lines.append(f"Warning: {w}")
         else:
             redcap_lines.append("Skipped (no defaults saved or export failed).")
-        row = self._add_section(scroll, row, "REDCap Export", redcap_lines)
+        row = add_summary_section(scroll, row, "REDCap Export", redcap_lines)
 
         # Sync
         sync_lines = []
@@ -270,7 +271,7 @@ class WelcomePanel(ctk.CTkFrame):
                         sync_lines.append(f"Error: {err}")
         else:
             sync_lines.append("No sync pairs configured.")
-        row = self._add_section(scroll, row, "Backup & Sync", sync_lines)
+        row = add_summary_section(scroll, row, "Backup & Sync", sync_lines)
 
         # OK button
         ctk.CTkButton(
@@ -284,22 +285,6 @@ class WelcomePanel(ctk.CTkFrame):
             hover_color=ACCENT_HOVER,
             command=lambda: self._close_summary(popup),
         ).grid(row=2, column=0, pady=(0, PAD_Y))
-
-    def _add_section(self, parent, row: int, title: str, lines: list[str]) -> int:
-        """Add a titled section with lines to the scrollable frame."""
-        ctk.CTkLabel(
-            parent, text=title, font=FONT_HEADING, anchor="w",
-        ).grid(row=row, column=0, sticky="w", pady=(PAD_Y, 2))
-        row += 1
-
-        for line in lines:
-            ctk.CTkLabel(
-                parent, text=line, font=FONT_SMALL, anchor="w",
-                wraplength=480, justify="left",
-            ).grid(row=row, column=0, sticky="w", padx=(12, 0), pady=1)
-            row += 1
-
-        return row
 
     def _close_summary(self, popup):
         popup.destroy()

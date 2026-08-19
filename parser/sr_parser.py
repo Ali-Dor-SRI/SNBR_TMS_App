@@ -30,7 +30,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from parser._common import to_float
+from parser._common import read_source_lines, to_float
 
 # DataFrame / CSV column holding the reference amplitude (mV).
 SR_MAX_COLUMN = "SR_max_cmap_1ms"
@@ -142,7 +142,4 @@ def parse_sr_file(filepath: str | Path) -> dict:
     Convenience wrapper around :func:`extract_sr_block` used by the plotting
     layer, which re-parses the curve on demand from the visit's source file.
     """
-    path = Path(filepath)
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
-        lines = handle.readlines()
-    return extract_sr_block(lines)
+    return extract_sr_block(read_source_lines(filepath))

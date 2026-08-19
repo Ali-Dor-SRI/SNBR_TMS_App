@@ -27,6 +27,7 @@ from parser._common import (
     apply_header_prefix_table,
     base_header_parsers,
     extract_study_and_id,
+    read_source_lines,
 )
 from parser.handedness import HANDEDNESS_COLUMN
 from parser.recording_target import (
@@ -351,9 +352,14 @@ def _present_isi_floats(record: dict, prefix: str, isis: list[str]) -> list[floa
     return sorted(present)
 
 
-def _classify_tsici_isi_n(record: dict) -> int | None:
-    """REDCap t_sici_p_isi_n option: 1=3 ISIs (1,2.5,3) · 2=6 ISIs (1-3.5) · 3=9 ISIs (1-7)."""
-    present = _present_isi_floats(record, "T_SICI", TSICI_ISIS)
+def _classify_sici_protocol_shape(present: list[float]) -> int | None:
+    """Shared classifier body for both t_sici_p_isi_n and a_sici_1000_isi_n.
+
+    Both REDCap radios use the same option codes:
+      * 1 = 3 ISIs (1, 2.5, 3)
+      * 2 = 6 ISIs (1-3.5)
+      * 3 = 9 ISIs (1-7)
+    """
     if not present:
         return None
     count = len(present)
@@ -369,6 +375,13 @@ def _classify_tsici_isi_n(record: dict) -> int | None:
     if count <= 6:
         return 2
     return 3
+
+
+def _classify_tsici_isi_n(record: dict) -> int | None:
+    """REDCap t_sici_p_isi_n option: 1=3 ISIs (1,2.5,3) · 2=6 ISIs (1-3.5) · 3=9 ISIs (1-7)."""
+    return _classify_sici_protocol_shape(
+        _present_isi_floats(record, "T_SICI", TSICI_ISIS)
+    )
 
 
 def _classify_sicf_protocol_shape(present: list[float]) -> int | None:
@@ -412,21 +425,9 @@ def _classify_tsicf_isi_n(record: dict) -> int | None:
 
 def _classify_asici_isi_n(record: dict) -> int | None:
     """REDCap a_sici_1000_isi_n: same 1/2/3 options as t_sici_p_isi_n."""
-    present = _present_isi_floats(record, "A_SICI", A_SICI_ISIS)
-    if not present:
-        return None
-    count = len(present)
-    if count >= 9 or max(present) >= 7.0:
-        return 3
-    if count == 3 and set(present) == {1.0, 2.5, 3.0}:
-        return 1
-    if count == 6 and max(present) <= 3.5:
-        return 2
-    if count <= 3:
-        return 1
-    if count <= 6:
-        return 2
-    return 3
+    return _classify_sici_protocol_shape(
+        _present_isi_floats(record, "A_SICI", A_SICI_ISIS)
+    )
 
 
 def _classify_asicf_isi_n(record: dict) -> int | None:
@@ -455,8 +456,7 @@ def parse_mem_file(filepath: str | Path) -> dict:
     that after parsing).
     """
     filepath_obj = Path(filepath)
-    with filepath_obj.open("r", encoding="utf-8", errors="replace") as fh:
-        lines = fh.readlines()
+    lines = read_source_lines(filepath_obj)
 
     # Attempt to extract study/ID from filename as fallback
     filename_study, filename_id = extract_study_and_id(filepath_obj.name)

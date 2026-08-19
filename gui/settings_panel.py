@@ -11,12 +11,13 @@ from core.user_settings import (
     KEY_REDCAP_TEMPLATE_DIR, KEY_REDCAP_EXPORT_DIR,
 )
 from gui.theme import (
-    FONT_TITLE, FONT_HEADING, FONT_BODY, FONT_SMALL, FONT_SUBTITLE, FONT_BUTTON,
+    FONT_TITLE, FONT_BODY, FONT_SMALL, FONT_SUBTITLE, FONT_BUTTON,
     ACCENT_COLOR, ACCENT_HOVER, ERROR_COLOR,
     SUBTITLE_COLOR,
     PAD_X, PAD_Y, SECTION_PAD_Y, BUTTON_HEIGHT, CORNER_RADIUS,
 )
 from gui.page_shell import resolve_footer
+from gui.widgets import add_summary_section
 
 
 class SettingsPanel(ctk.CTkFrame):
@@ -90,12 +91,12 @@ class SettingsPanel(ctk.CTkFrame):
         row = 0
 
         # Participant
-        row = self._add_section(self._scroll, row, "Participant", [
+        row = add_summary_section(self._scroll, row, "Participant", [
             "Most recent visit (auto-selected)",
         ])
 
         # Cortex
-        row = self._add_section(self._scroll, row, "Cortex", [
+        row = add_summary_section(self._scroll, row, "Cortex", [
             "Both hemispheres when available",
         ])
 
@@ -111,14 +112,14 @@ class SettingsPanel(ctk.CTkFrame):
             f"CMAP Dir: {_fmt(defaults.get(KEY_CMAP_DIR))}",
             f"CSV File: {_fmt(defaults.get(KEY_CSV_FILE))}",
         ]
-        row = self._add_section(self._scroll, row, "Import Paths", import_lines)
+        row = add_summary_section(self._scroll, row, "Import Paths", import_lines)
 
         # Export Paths
         export_lines = [
             f"CSV Export: {defaults.get(KEY_EXPORT_CSV) or '(not set)'}",
             f"PDF Export: {defaults.get(KEY_EXPORT_PDF) or '(not set)'}",
         ]
-        row = self._add_section(self._scroll, row, "Export Paths", export_lines)
+        row = add_summary_section(self._scroll, row, "Export Paths", export_lines)
 
         # REDCap Export Paths
         redcap_lines = [
@@ -127,13 +128,13 @@ class SettingsPanel(ctk.CTkFrame):
             f"Template Dir: {defaults.get(KEY_REDCAP_TEMPLATE_DIR) or '(not set)'}",
             f"Export Dir: {defaults.get(KEY_REDCAP_EXPORT_DIR) or '(not set)'}",
         ]
-        row = self._add_section(self._scroll, row, "REDCap Export", redcap_lines)
+        row = add_summary_section(self._scroll, row, "REDCap Export", redcap_lines)
 
         # Graphs
         from gui.visualization_panel import GRAPH_REGISTRY
         graph_lines = [f"{i+1}. {entry.label}" for i, entry in enumerate(GRAPH_REGISTRY)]
         graph_lines.append(f"Total: {len(GRAPH_REGISTRY)} graphs (all available)")
-        row = self._add_section(self._scroll, row, "Graphs in Report", graph_lines)
+        row = add_summary_section(self._scroll, row, "Graphs in Report", graph_lines)
 
         # Sync Pairs
         sync_pairs = defaults.get(KEY_SYNC_PAIRS, [])
@@ -144,7 +145,7 @@ class SettingsPanel(ctk.CTkFrame):
             ]
         else:
             sync_lines = ["No sync pairs configured."]
-        row = self._add_section(self._scroll, row, "Backup & Sync", sync_lines)
+        row = add_summary_section(self._scroll, row, "Backup & Sync", sync_lines)
 
     # ── Clear defaults ────────────────────────────────────
 
@@ -197,18 +198,3 @@ class SettingsPanel(ctk.CTkFrame):
 
     # ── Helpers ────────────────────────────────────────────
 
-    def _add_section(self, parent, row: int, title: str, lines: list[str]) -> int:
-        """Add a titled section with lines to the scrollable frame."""
-        ctk.CTkLabel(
-            parent, text=title, font=FONT_HEADING, anchor="w",
-        ).grid(row=row, column=0, sticky="w", pady=(PAD_Y, 2))
-        row += 1
-
-        for line in lines:
-            ctk.CTkLabel(
-                parent, text=line, font=FONT_SMALL, anchor="w",
-                wraplength=480, justify="left",
-            ).grid(row=row, column=0, sticky="w", padx=(12, 0), pady=1)
-            row += 1
-
-        return row

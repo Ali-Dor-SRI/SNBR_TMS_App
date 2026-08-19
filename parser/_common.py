@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Callable
 
 from parser.handedness import (
@@ -50,6 +51,18 @@ from parser.recording_target import (
 )
 
 STUDY_ID_PATTERN = re.compile(r"([A-Za-z]+)\d*-0*(\d+)", flags=re.IGNORECASE)
+
+
+def read_source_lines(filepath: str | Path) -> list[str]:
+    """Read a .MEM file's lines under the parsers' shared decoding policy.
+
+    ``errors="replace"`` is the load-bearing part: some Qtrac exports carry
+    bytes that are not valid UTF-8, and one of them must not cost the whole
+    recording. All four .MEM readers opened files this way; this is that one
+    decision in one place.
+    """
+    with Path(filepath).open("r", encoding="utf-8", errors="replace") as handle:
+        return handle.readlines()
 
 
 def extract_study_and_id(text: str | None) -> tuple[str | None, int | None]:

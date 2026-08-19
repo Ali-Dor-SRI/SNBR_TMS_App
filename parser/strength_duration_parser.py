@@ -45,7 +45,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from parser._common import to_float
+from parser._common import read_source_lines, to_float
 
 # DataFrame / CSV columns holding the two derived strength-duration scalars.
 # These are the only strength-duration values stored on the parsed record --
@@ -201,10 +201,7 @@ def parse_strength_duration_file(filepath: str | Path) -> dict:
     layer, which re-parses the per-duration points on demand from the visit's
     source file.
     """
-    path = Path(filepath)
-    with path.open("r", encoding="utf-8", errors="replace") as handle:
-        lines = handle.readlines()
-    return extract_sd_block(lines)
+    return extract_sd_block(read_source_lines(filepath))
 
 
 # ---------------------------------------------------------------------------

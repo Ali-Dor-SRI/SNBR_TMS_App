@@ -21,6 +21,7 @@ from parser._common import (
     apply_header_prefix_table,
     base_header_parsers,
     extract_study_and_id,
+    read_source_lines,
 )
 from parser.handedness import HANDEDNESS_COLUMN
 from parser.mem_parser import iter_files, normalize_dirs
@@ -142,8 +143,7 @@ def parse_csp_file(filepath: str | Path) -> dict:
     adds it after parsing.
     """
     filepath_obj = Path(filepath)
-    with filepath_obj.open("r", encoding="utf-8", errors="replace") as fh:
-        lines = fh.readlines()
+    lines = read_source_lines(filepath_obj)
 
     record = initialize_csp_record()
     filename_study, filename_id = extract_study_and_id(filepath_obj.name)
