@@ -26,7 +26,7 @@ from processing.cohort_filters import (
     restrict_cohort_to_analysis_cortex,
     restrict_cohort_to_study,
 )
-from processing.df_builder import restrict_participant_to_target, target_labels_in
+from processing.df_builder import restrict_participant_to_target
 from reports.captions import (
     caption_for,
     csp_profile_caption,

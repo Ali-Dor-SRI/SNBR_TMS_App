@@ -6,19 +6,15 @@ Source directories are verified to be unmodified after every sync.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import shutil
 import time
 import threading
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 from back_up_sync.file_sync import (
     SyncPair,
-    SyncResult,
     _should_copy,
     file_hash,
     sync_directory,

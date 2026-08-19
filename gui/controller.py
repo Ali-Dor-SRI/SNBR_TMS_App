@@ -63,7 +63,6 @@ from processing.visualizer import (
     RMT_COLUMNS,
     WAVEFORM_MEASURE_CONFIGS,
     format_participant_label,
-    normalize_mem_date,
     waveform_measure_config,
     plot_mem_graph,
 )

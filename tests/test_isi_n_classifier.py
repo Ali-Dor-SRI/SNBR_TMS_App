@@ -7,9 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from parser.mem_parser import (
     ASICF_ISIS,
-    A_SICI_ISIS,
     TSICF_ISIS,
-    TSICI_ISIS,
     _assign_isi_counts,
     _classify_asicf_isi_n,
     _classify_asici_isi_n,

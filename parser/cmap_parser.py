@@ -20,15 +20,12 @@ parse_cmap_directory(input_dir) -> list[dict]
 from __future__ import annotations
 
 import json
-import re
 import warnings
 from datetime import datetime
 from pathlib import Path
 
 from parser._common import extract_study_and_id
 from parser.mem_parser import iter_files, normalize_dirs
-
-_VISIT_DATE_PATTERN = re.compile(r"Visit Date:\s*([0-9A-Za-z/:\-\s]+?)\s*$", re.IGNORECASE)
 
 # Date formats seen in source files. First match wins.
 _DATE_FORMATS = (

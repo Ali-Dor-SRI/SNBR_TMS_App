@@ -20,9 +20,9 @@ from gui.redcap_panel import RedcapPanel
 from gui.settings_panel import SettingsPanel
 from gui.page_shell import PageShell
 from gui.theme import (
-    FONT_SMALL, FONT_BUTTON, FONT_BODY, FONT_HEADING, FONT_TITLE,
-    ACCENT_COLOR, ACCENT_HOVER, ERROR_COLOR, SUCCESS_COLOR, DISABLED_FG,
-    PAD_X, PAD_Y, BUTTON_HEIGHT, CORNER_RADIUS, SECTION_PAD_Y,
+    FONT_SMALL, FONT_BUTTON, FONT_HEADING,
+    ACCENT_COLOR, ACCENT_HOVER, ERROR_COLOR,
+    PAD_X, PAD_Y, BUTTON_HEIGHT, CORNER_RADIUS,
 )
 
 # Friendly labels for the page-jump dropdown.

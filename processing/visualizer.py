@@ -16,9 +16,8 @@ from __future__ import annotations
 from processing._v1_visualization import (  # noqa: F401
     # Constants / helpers
     normalize_mem_date,
-    CORTEX_COLORS,
-    CORTEX_FACE_COLORS,
-    cortex_color,
+
+
     CSP_MEASURE_KEY,
     CSP_MEASURE_LABEL,
     CSP_PROFILE_COLUMNS,
