@@ -217,26 +217,33 @@ def _format_numeric_demographic(value) -> str:
     return str(int(v)) if v.is_integer() else f"{v:.1f}"
 
 
+def _non_blank_text(rows: pd.DataFrame, column: str) -> pd.Series:
+    """Trimmed, non-blank values of a text *column*, in row order.
+
+    Raises ``KeyError`` when the column is absent. That is deliberate: the
+    callers that tolerate a missing column test for it themselves, and the
+    ones that do not only ever run against the parser's full schema.
+    """
+    return (
+        rows[column].astype("string").fillna("").str.strip()
+        .replace("", pd.NA).dropna()
+    )
+
+
 def _latest_non_missing_age(rows: pd.DataFrame) -> str:
     ages = pd.to_numeric(rows["Age"], errors="coerce").dropna()
     return _format_numeric_demographic(ages.iloc[-1]) if not ages.empty else "Unknown"
 
 
 def _latest_non_missing_sex(rows: pd.DataFrame) -> str:
-    vals = (
-        rows["Sex"].astype("string").fillna("").str.strip()
-        .replace("", pd.NA).dropna()
-    )
+    vals = _non_blank_text(rows, "Sex")
     return str(vals.iloc[-1]).upper() if not vals.empty else "Unknown"
 
 
 def _latest_non_missing_study(rows: pd.DataFrame) -> str:
     if "Study" not in rows.columns:
         return "Unknown"
-    vals = (
-        rows["Study"].astype("string").fillna("").str.strip()
-        .replace("", pd.NA).dropna()
-    )
+    vals = _non_blank_text(rows, "Study")
     return str(vals.iloc[-1]) if not vals.empty else "Unknown"
 
 
@@ -261,10 +268,7 @@ def _recording_targets_text(rows: pd.DataFrame) -> str:
 def _latest_non_missing_stimulated_cortex(rows: pd.DataFrame) -> str:
     if "Stimulated_cortex" not in rows.columns:
         return "Unknown"
-    vals = (
-        rows["Stimulated_cortex"].astype("string").fillna("").str.strip()
-        .replace("", pd.NA).dropna()
-    )
+    vals = _non_blank_text(rows, "Stimulated_cortex")
     if vals.empty:
         return "Unknown"
     unique = vals.unique().tolist()
@@ -278,10 +282,7 @@ _SUBJECT_TYPE_DISPLAY = {
 
 
 def _latest_non_missing_subject_type(rows: pd.DataFrame) -> str:
-    vals = (
-        rows["Subject_type"].astype("string").fillna("").str.strip()
-        .replace("", pd.NA).dropna()
-    )
+    vals = _non_blank_text(rows, "Subject_type")
     if vals.empty:
         return "Unknown"
     raw = str(vals.iloc[-1])
@@ -494,35 +495,36 @@ def _build_message_figure(title: str, message: str):
     return fig
 
 
-def _extract_cmap_rows_for_visit(
+def _extract_json_table_rows_for_visit(
     participant_rows: pd.DataFrame,
     visit_date: str | None,
+    column: str,
 ) -> list[dict]:
-    """Return the list of CMAP row-dicts for the given visit, or [].
+    """Return the row-dicts stored as JSON in *column* for the given visit, or [].
 
-    Looks at the ``CMAP_table`` column (JSON string). When *visit_date* is
-    given, only rows whose ``Date`` matches (normalized ``dd/mm/YYYY``) are
-    considered; otherwise the most-recent non-null entry wins. Multiple files
-    for the same visit concatenate in source order.
+    When *visit_date* is given, only rows whose ``Date`` matches (normalized
+    ``dd/mm/YYYY``) are considered; otherwise the most-recent non-null entry
+    wins. Multiple files for the same visit concatenate in source order.
+
+    When two MEM rows (e.g. L + R hemispheres) share the same visit, the same
+    JSON payload is written onto both. De-duplicating on the raw payload keeps
+    the report table from showing doubled entries.
     """
     import json
 
-    if "CMAP_table" not in participant_rows.columns:
+    if column not in participant_rows.columns:
         return []
 
     rows = participant_rows.copy()
     if visit_date is not None and "Date" in rows.columns:
         rows = rows[rows["Date"].astype("string").fillna("").str.strip() == visit_date]
-    rows = rows[rows["CMAP_table"].notna()]
+    rows = rows[rows[column].notna()]
     if rows.empty:
         return []
 
-    # When two MEM rows (e.g. L + R hemispheres) share the same visit, the
-    # same CMAP JSON is written onto both. De-duplicate on the raw payload so
-    # the report table doesn't show doubled entries.
     seen: set[str] = set()
     out: list[dict] = []
-    for raw in rows["CMAP_table"].tolist():
+    for raw in rows[column].tolist():
         s = str(raw).strip()
         if not s or s.lower() == "nan":
             continue
@@ -538,39 +540,23 @@ def _extract_cmap_rows_for_visit(
     return out
 
 
+# Both names are imported by gui/controller.py, so they stay as named seams
+# rather than becoming a column argument at the call sites.
+
+def _extract_cmap_rows_for_visit(
+    participant_rows: pd.DataFrame,
+    visit_date: str | None,
+) -> list[dict]:
+    """Return the list of CMAP row-dicts for the given visit, or []."""
+    return _extract_json_table_rows_for_visit(participant_rows, visit_date, "CMAP_table")
+
+
 def _extract_munix_rows_for_visit(
     participant_rows: pd.DataFrame,
     visit_date: str | None,
 ) -> list[dict]:
     """Return the list of MUNIX row-dicts for the given visit, or []."""
-    import json
-
-    if "MUNIX_table" not in participant_rows.columns:
-        return []
-
-    rows = participant_rows.copy()
-    if visit_date is not None and "Date" in rows.columns:
-        rows = rows[rows["Date"].astype("string").fillna("").str.strip() == visit_date]
-    rows = rows[rows["MUNIX_table"].notna()]
-    if rows.empty:
-        return []
-
-    seen: set[str] = set()
-    out: list[dict] = []
-    for raw in rows["MUNIX_table"].tolist():
-        s = str(raw).strip()
-        if not s or s.lower() == "nan":
-            continue
-        if s in seen:  # de-duplicate when two hemisphere rows carry the same payload
-            continue
-        seen.add(s)
-        try:
-            parsed = json.loads(s)
-        except (ValueError, TypeError):
-            continue
-        if isinstance(parsed, list):
-            out.extend(p for p in parsed if isinstance(p, dict))
-    return out
+    return _extract_json_table_rows_for_visit(participant_rows, visit_date, "MUNIX_table")
 
 
 def _format_number(value, fmt: str = "{:.2f}") -> str:
@@ -1136,6 +1122,25 @@ def _items_from_message(section_key: str, title: str, message: str) -> list[Repo
     )]
 
 
+def _items_from_panels(fig_list, plot_data, section_key: str) -> list[ReportItem]:
+    """Pair each figure of a multi-panel plot with its own caption.
+
+    The grouped RMT and CSP builders return one figure per panel plus a
+    ``plot_data`` dict holding ``figure_keys`` (parallel to the figures) and
+    ``panels`` (keyed by those). A panel with no matching data gets no caption
+    rather than a wrong one.
+    """
+    figure_keys = plot_data.get("figure_keys") if isinstance(plot_data, dict) else None
+    panels = plot_data.get("panels") if isinstance(plot_data, dict) else None
+    items: list[ReportItem] = []
+    for idx, fig in enumerate(fig_list):
+        panel_key = figure_keys[idx] if figure_keys and idx < len(figure_keys) else None
+        panel_data = panels.get(panel_key) if panels and panel_key else None
+        caption = grouped_caption(panel_data, metric_label=panel_key) if panel_data else None
+        items.append(ReportItem(figure=fig, caption=caption, section_key=section_key))
+    return items
+
+
 def _measure_group_or_message(
     section_key, measure, pid, anchor, label, df, comp, match_by=None,
     age_window=5, show=False, skip=False,
@@ -1183,16 +1188,8 @@ def _rmt_group_or_message(
     except ValueError as exc:
         return [] if skip else _items_from_message(section_key, title, str(exc))
 
-    items: list[ReportItem] = []
     fig_list = figs if isinstance(figs, list) else [figs]
-    figure_keys = plot_data.get("figure_keys") if isinstance(plot_data, dict) else None
-    panels = plot_data.get("panels") if isinstance(plot_data, dict) else None
-    for idx, fig in enumerate(fig_list):
-        panel_key = figure_keys[idx] if figure_keys and idx < len(figure_keys) else None
-        panel_data = panels.get(panel_key) if panels and panel_key else None
-        caption = grouped_caption(panel_data, metric_label=panel_key) if panel_data else None
-        items.append(ReportItem(figure=fig, caption=caption, section_key=section_key))
-    return items
+    return _items_from_panels(fig_list, plot_data, section_key)
 
 
 def _csp_group_or_message(
@@ -1218,16 +1215,7 @@ def _csp_group_or_message(
     # plot_csp_grouped_graph returns either a single figure (single CSP level)
     # or a list (one per level). Handle both uniformly.
     if isinstance(fig, list):
-        fig_list = fig
-        figure_keys = plot_data.get("figure_keys") if isinstance(plot_data, dict) else None
-        panels = plot_data.get("panels") if isinstance(plot_data, dict) else None
-        items: list[ReportItem] = []
-        for idx, f in enumerate(fig_list):
-            panel_key = figure_keys[idx] if figure_keys and idx < len(figure_keys) else None
-            panel_data = panels.get(panel_key) if panels and panel_key else None
-            caption = grouped_caption(panel_data, metric_label=panel_key) if panel_data else None
-            items.append(ReportItem(figure=f, caption=caption, section_key=section_key))
-        return items
+        return _items_from_panels(fig, plot_data, section_key)
 
     return [ReportItem(
         figure=fig,
