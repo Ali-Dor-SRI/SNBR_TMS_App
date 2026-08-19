@@ -27,12 +27,27 @@ extract_match(pattern, stripped)    -> str
 extract_subject_type(stripped)      -> "Control" | "Patient"
 extract_stimulated_cortex(stripped) -> str
 to_float(token)                     -> float
+base_header_parsers()               -> prefix -> parser table
+apply_header_prefix_table(stripped, record, parsers)
 """
 
 from __future__ import annotations
 
 import re
 from datetime import datetime
+from typing import Callable
+
+from parser.handedness import (
+    HANDEDNESS_COLUMN,
+    HANDEDNESS_LINE_PREFIXES,
+    extract_handedness,
+)
+from parser.recording_target import (
+    MUSCLE_COLUMN,
+    SIDE_COLUMN,
+    extract_muscle,
+    extract_recorded_side,
+)
 
 STUDY_ID_PATTERN = re.compile(r"([A-Za-z]+)\d*-0*(\d+)", flags=re.IGNORECASE)
 
@@ -98,3 +113,63 @@ def to_float(token: str) -> float | None:
         return float(token)
     except (TypeError, ValueError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Header prefix table
+# ---------------------------------------------------------------------------
+
+def base_header_parsers() -> dict[str, tuple[str, Callable] | Callable]:
+    """Return the prefix -> parser table every Qtrac .MEM header shares.
+
+    A fresh dict each call: ``mem_parser`` extends its copy with the fields only
+    the TMS export carries, and the two tables must not alias one another.
+    Insertion order is preserved because :func:`apply_header_prefix_table`
+    returns on the first matching prefix.
+    """
+    return {
+        "Name:": lambda s: extract_study_and_id(s),  # returns (study, id) — special-cased
+        "Date:": ("Date", extract_date),
+        "Age:": ("Age", lambda s: extract_int(r"Age:\s+(\d+)", s)),
+        "Sex:": ("Sex", lambda s: extract_match(r"Sex:\s+([MF])", s)),
+        "Subject type:": ("Subject_type", extract_subject_type),
+        "Stim/record": ("Stimulated_cortex", extract_stimulated_cortex),
+        "Muscle:": (MUSCLE_COLUMN, extract_muscle),
+    }
+
+
+def apply_header_prefix_table(
+    stripped: str, record: dict, parsers: dict[str, tuple[str, Callable] | Callable]
+) -> None:
+    """Parse one header line into *record* using the *parsers* prefix table.
+
+    Callers that recognise a line themselves must do so **before** delegating
+    here, because this returns on the first prefix that matches.
+    """
+    # Matched on the whole line, not through the prefix table: the older export
+    # format ("Subject right-handed") carries no field name to key on.
+    if stripped.startswith(HANDEDNESS_LINE_PREFIXES):
+        hand = extract_handedness(stripped)
+        if hand is not None:
+            record[HANDEDNESS_COLUMN] = hand
+        return
+    for prefix, entry in parsers.items():
+        if stripped.startswith(prefix):
+            if prefix == "Name:":
+                study, pid = entry(stripped)
+                if study is not None:
+                    record["Study"] = study
+                if pid is not None:
+                    record["ID"] = pid
+            else:
+                key, parser = entry
+                value = parser(stripped)
+                if value is not None:
+                    record[key] = value
+                if prefix == "Stim/record":
+                    # The same line carries the recorded side on the right of
+                    # the arrow ("L->R": stimulate left cortex, record right).
+                    side = extract_recorded_side(stripped)
+                    if side is not None:
+                        record[SIDE_COLUMN] = side
+            return

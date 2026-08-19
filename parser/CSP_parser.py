@@ -18,25 +18,13 @@ from pathlib import Path
 from typing import Callable
 
 from parser._common import (
-    extract_date,
-    extract_int,
-    extract_match,
-    extract_stimulated_cortex,
+    apply_header_prefix_table,
+    base_header_parsers,
     extract_study_and_id,
-    extract_subject_type,
 )
-from parser.handedness import (
-    HANDEDNESS_COLUMN,
-    HANDEDNESS_LINE_PREFIXES,
-    extract_handedness,
-)
+from parser.handedness import HANDEDNESS_COLUMN
 from parser.mem_parser import iter_files, normalize_dirs
-from parser.recording_target import (
-    MUSCLE_COLUMN,
-    SIDE_COLUMN,
-    extract_muscle,
-    extract_recorded_side,
-)
+from parser.recording_target import MUSCLE_COLUMN, SIDE_COLUMN
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -94,43 +82,12 @@ def initialize_csp_record() -> dict:
 # Header-field parsing helpers (pure-Python, no pandas/numpy)
 # ---------------------------------------------------------------------------
 
-_HEADER_PARSERS: dict[str, tuple[str, Callable] | Callable] = {
-    "Name:": lambda s: extract_study_and_id(s),  # returns (study, id) — special-cased
-    "Date:": ("Date", extract_date),
-    "Age:": ("Age", lambda s: extract_int(r"Age:\s+(\d+)", s)),
-    "Sex:": ("Sex", lambda s: extract_match(r"Sex:\s+([MF])", s)),
-    "Subject type:": ("Subject_type", extract_subject_type),
-    "Stim/record": ("Stimulated_cortex", extract_stimulated_cortex),
-    "Muscle:": (MUSCLE_COLUMN, extract_muscle),
-}
+# CSP exports carry exactly the shared header fields — no CSP-only additions.
+_HEADER_PARSERS: dict[str, tuple[str, Callable] | Callable] = base_header_parsers()
 
 
 def _parse_header_field(stripped: str, record: dict) -> None:
-    # Matched on the whole line, not through the prefix table: the older export
-    # format ("Subject right-handed") carries no field name to key on.
-    if stripped.startswith(HANDEDNESS_LINE_PREFIXES):
-        hand = extract_handedness(stripped)
-        if hand is not None:
-            record[HANDEDNESS_COLUMN] = hand
-        return
-    for prefix, entry in _HEADER_PARSERS.items():
-        if stripped.startswith(prefix):
-            if prefix == "Name:":
-                study, pid = entry(stripped)
-                if study is not None:
-                    record["Study"] = study
-                if pid is not None:
-                    record["ID"] = pid
-            else:
-                key, parser = entry
-                value = parser(stripped)
-                if value is not None:
-                    record[key] = value
-                if prefix == "Stim/record":
-                    side = extract_recorded_side(stripped)
-                    if side is not None:
-                        record[SIDE_COLUMN] = side
-            return
+    apply_header_prefix_table(stripped, record, _HEADER_PARSERS)
 
 
 # ---------------------------------------------------------------------------

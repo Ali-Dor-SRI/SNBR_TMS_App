@@ -24,23 +24,14 @@ from pathlib import Path
 from typing import Callable
 
 from parser._common import (
-    extract_date,
-    extract_int,
-    extract_match,
-    extract_stimulated_cortex,
+    apply_header_prefix_table,
+    base_header_parsers,
     extract_study_and_id,
-    extract_subject_type,
 )
-from parser.handedness import (
-    HANDEDNESS_COLUMN,
-    HANDEDNESS_LINE_PREFIXES,
-    extract_handedness,
-)
+from parser.handedness import HANDEDNESS_COLUMN
 from parser.recording_target import (
     MUSCLE_COLUMN,
     SIDE_COLUMN,
-    extract_muscle,
-    extract_recorded_side,
     extract_sr_sites_target,
 )
 from parser.sr_parser import SR_CURVE_COLUMN, SR_MAX_COLUMN, extract_sr_block
@@ -208,14 +199,9 @@ def _extract_tms_coil(stripped: str) -> str | None:
     return None
 
 
+# The shared header fields plus the one only the TMS export carries.
 _HEADER_PARSERS: dict[str, tuple[str, Callable] | Callable] = {
-    "Name:": lambda s: extract_study_and_id(s),  # returns (study, id) — special-cased
-    "Date:": ("Date", extract_date),
-    "Age:": ("Age", lambda s: extract_int(r"Age:\s+(\d+)", s)),
-    "Sex:": ("Sex", lambda s: extract_match(r"Sex:\s+([MF])", s)),
-    "Subject type:": ("Subject_type", extract_subject_type),
-    "Stim/record": ("Stimulated_cortex", extract_stimulated_cortex),
-    "Muscle:": (MUSCLE_COLUMN, extract_muscle),
+    **base_header_parsers(),
     "TMS Coil:": ("TMS_coil", _extract_tms_coil),
 }
 
@@ -236,37 +222,12 @@ def _parse_sr_sites(stripped: str, record: dict) -> None:
 
 
 def _parse_header_field(stripped: str, record: dict) -> None:
+    # Checked before the shared table: only the peripheral files carry this
+    # line, and it must win over any prefix the table might also match.
     if stripped.startswith("S/R sites:"):
         _parse_sr_sites(stripped, record)
         return
-    # Handedness is matched on the whole line rather than through the prefix
-    # table below: the older export format ("Subject right-handed") carries no
-    # field name, so there is no prefix to key it on.
-    if stripped.startswith(HANDEDNESS_LINE_PREFIXES):
-        hand = extract_handedness(stripped)
-        if hand is not None:
-            record[HANDEDNESS_COLUMN] = hand
-        return
-    for prefix, entry in _HEADER_PARSERS.items():
-        if stripped.startswith(prefix):
-            if prefix == "Name:":
-                study, pid = entry(stripped)
-                if study is not None:
-                    record["Study"] = study
-                if pid is not None:
-                    record["ID"] = pid
-            else:
-                key, parser = entry
-                value = parser(stripped)
-                if value is not None:
-                    record[key] = value
-                if prefix == "Stim/record":
-                    # The same line carries the recorded side on the right of
-                    # the arrow ("L->R": stimulate left cortex, record right).
-                    side = extract_recorded_side(stripped)
-                    if side is not None:
-                        record[SIDE_COLUMN] = side
-            return
+    apply_header_prefix_table(stripped, record, _HEADER_PARSERS)
 
 
 # ---------------------------------------------------------------------------
