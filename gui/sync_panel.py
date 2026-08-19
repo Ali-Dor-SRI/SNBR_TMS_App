@@ -18,8 +18,16 @@ from gui.theme import (
 class SyncPanel(ctk.CTkFrame):
     """Backup & Sync page — copy files from source(s) to destination(s)."""
 
-    def __init__(self, parent, controller, on_next, on_back):
+    def __init__(self, parent, controller, on_next, on_back, footer=None):
         super().__init__(parent, fg_color="transparent")
+        # The pinned bar at the bottom of the window (gui.page_shell.PageShell).
+        # Panels grid their Back/Next, action buttons, progress bar and status
+        # line into it so those never scroll away with the content. Falling back
+        # to a row of its own keeps a panel constructible standalone.
+        self._footer = footer
+        if self._footer is None:
+            self._footer = ctk.CTkFrame(self, fg_color="transparent")
+            self._footer.grid(row=99, column=0, sticky="ew")
         self._controller = controller
         self._on_next = on_next
         self._on_back = on_back
@@ -83,30 +91,33 @@ class SyncPanel(ctk.CTkFrame):
 
         # ── Progress bar (hidden) ──────────────────────────
         self._progress = ctk.CTkProgressBar(
-            self, mode="determinate", width=400, variable=self._progress_var,
+            self._footer, mode="determinate", width=400,
+            variable=self._progress_var,
         )
-        self._progress.grid(row=4, column=0, padx=PAD_X, pady=(PAD_Y, 0))
+        self._progress.grid(row=0, column=0, padx=PAD_X, pady=(PAD_Y, 0))
         self._progress.grid_remove()
 
         # ── Current file label ─────────────────────────────
+        # Shares the status row with the summary line below it: the file being
+        # copied is only shown while a sync runs, and the summary only after.
         self._file_label = ctk.CTkLabel(
-            self, textvariable=self._current_file_var,
+            self._footer, textvariable=self._current_file_var,
             font=FONT_SMALL, text_color=DISABLED_FG, anchor="w",
             wraplength=700,
         )
-        self._file_label.grid(row=5, column=0, sticky="w", padx=PAD_X, pady=(2, 0))
+        self._file_label.grid(row=1, column=0, sticky="w", padx=PAD_X, pady=(2, 0))
 
         # ── Status label ───────────────────────────────────
         self._status_label = ctk.CTkLabel(
-            self, textvariable=self._status_var,
+            self._footer, textvariable=self._status_var,
             font=FONT_SMALL, text_color=DISABLED_FG, anchor="w",
             wraplength=700,
         )
-        self._status_label.grid(row=6, column=0, sticky="w", padx=PAD_X, pady=(2, 0))
+        self._status_label.grid(row=2, column=0, sticky="w", padx=PAD_X, pady=(2, 0))
 
-        # ── Navigation ─────────────────────────────────────
-        nav = ctk.CTkFrame(self, fg_color="transparent")
-        nav.grid(row=7, column=0, sticky="ew", padx=PAD_X, pady=(PAD_Y, SECTION_PAD_Y))
+        # ── Navigation (pinned; see gui.page_shell) ────────
+        nav = ctk.CTkFrame(self._footer, fg_color="transparent")
+        nav.grid(row=3, column=0, sticky="ew", padx=PAD_X, pady=(PAD_Y, PAD_Y))
         nav.grid_columnconfigure(1, weight=1)
 
         self._back_btn = ctk.CTkButton(

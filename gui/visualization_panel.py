@@ -131,8 +131,16 @@ class _NavItem:
 class VisualizationPanel(ctk.CTkFrame):
     """Graph selection & preview — page 4 of the workflow."""
 
-    def __init__(self, parent, controller, on_next, on_back):
+    def __init__(self, parent, controller, on_next, on_back, footer=None):
         super().__init__(parent, fg_color="transparent")
+        # The pinned bar at the bottom of the window (gui.page_shell.PageShell).
+        # Panels grid their Back/Next, action buttons, progress bar and status
+        # line into it so those never scroll away with the content. Falling back
+        # to a row of its own keeps a panel constructible standalone.
+        self._footer = footer
+        if self._footer is None:
+            self._footer = ctk.CTkFrame(self, fg_color="transparent")
+            self._footer.grid(row=99, column=0, sticky="ew")
         self._controller = controller
         self._on_next = on_next
         self._on_back = on_back
@@ -299,13 +307,13 @@ class VisualizationPanel(ctk.CTkFrame):
 
         # Status / error
         ctk.CTkLabel(
-            self, textvariable=self._status_var, font=FONT_SMALL,
+            self._footer, textvariable=self._status_var, font=FONT_SMALL,
             text_color=ERROR_COLOR, anchor="w", wraplength=600,
-        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=PAD_X, pady=(4, 0))
+        ).grid(row=1, column=0, sticky="w", padx=PAD_X, pady=(2, 0))
 
-        # ── Bottom navigation bar ─────────────────────────
-        nav = ctk.CTkFrame(self, fg_color="transparent")
-        nav.grid(row=3, column=0, columnspan=2, sticky="ew", padx=PAD_X, pady=(PAD_Y, SECTION_PAD_Y))
+        # ── Bottom navigation bar (pinned; see gui.page_shell) ──
+        nav = ctk.CTkFrame(self._footer, fg_color="transparent")
+        nav.grid(row=2, column=0, sticky="ew", padx=PAD_X, pady=(PAD_Y, PAD_Y))
         nav.grid_columnconfigure(0, weight=1)
 
         ctk.CTkButton(
@@ -808,14 +816,13 @@ class VisualizationPanel(ctk.CTkFrame):
             self._status_var.set("Figure has not been generated yet.")
             return
 
-        # Build a default filename from the graph label
-        safe_name = item.sub_label.replace(" ", "_").replace("—", "-")
-        default_name = f"{safe_name}.png"
-
+        # Offer the study, participant, graph and visit date rather than the
+        # graph label alone, so a saved figure identifies itself later.
         path = filedialog.asksaveasfilename(
             title="Save Figure",
             defaultextension=".png",
-            initialfile=default_name,
+            initialfile=self._controller.default_graph_filename(item.sub_label),
+            initialdir=self._controller.default_export_folder("pdf"),
             filetypes=[("PNG Image", "*.png"), ("All files", "*.*")],
         )
         if not path:

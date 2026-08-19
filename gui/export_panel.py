@@ -20,8 +20,16 @@ from gui.theme import (
 class ExportPanel(ctk.CTkFrame):
     """Export page — page 5 (final) of the workflow."""
 
-    def __init__(self, parent, controller, on_next, on_back):
+    def __init__(self, parent, controller, on_next, on_back, footer=None):
         super().__init__(parent, fg_color="transparent")
+        # The pinned bar at the bottom of the window (gui.page_shell.PageShell).
+        # Panels grid their Back/Next, action buttons, progress bar and status
+        # line into it so those never scroll away with the content. Falling back
+        # to a row of its own keeps a panel constructible standalone.
+        self._footer = footer
+        if self._footer is None:
+            self._footer = ctk.CTkFrame(self, fg_color="transparent")
+            self._footer.grid(row=99, column=0, sticky="ew")
         self._controller = controller
         self._on_next = on_next
         self._on_back = on_back
@@ -70,7 +78,10 @@ class ExportPanel(ctk.CTkFrame):
         self._build_export_row(
             rows_frame, row=0,
             label="Export DataFrame to CSV",
-            helper="Saves the working data frame as a .csv file for future use.",
+            helper=(
+                "Saves the working data frame as a .csv file for future use. "
+                "Leave the box empty to name it automatically (df_<date>)."
+            ),
             check_var=self._csv_check,
             path_var=self._csv_path,
             browse_cmd=self._browse_csv,
@@ -80,7 +91,11 @@ class ExportPanel(ctk.CTkFrame):
         self._build_export_row(
             rows_frame, row=1,
             label="Export Report to PDF",
-            helper="Appends the selected graphs into a single PDF report.",
+            helper=(
+                "Appends the selected graphs into a single PDF report. "
+                "Leave the box empty to name it automatically "
+                "(report_<study>_<participant>)."
+            ),
             check_var=self._pdf_check,
             path_var=self._pdf_path,
             browse_cmd=self._browse_pdf,
@@ -88,24 +103,26 @@ class ExportPanel(ctk.CTkFrame):
         )
 
         # ── Progress bar (hidden) ──────────────────────────
-        self._progress = ctk.CTkProgressBar(self, mode="indeterminate", width=400)
-        self._progress.grid(row=3, column=0, padx=PAD_X, pady=(PAD_Y, 0))
+        self._progress = ctk.CTkProgressBar(
+            self._footer, mode="indeterminate", width=400,
+        )
+        self._progress.grid(row=0, column=0, padx=PAD_X, pady=(PAD_Y, 0))
         self._progress.grid_remove()
 
         # ── Status label ───────────────────────────────────
         self._status_label = ctk.CTkLabel(
-            self,
+            self._footer,
             textvariable=self._status_var,
             font=FONT_SMALL,
             text_color=DISABLED_FG,
             anchor="w",
             wraplength=700,
         )
-        self._status_label.grid(row=4, column=0, sticky="w", padx=PAD_X, pady=(PAD_Y, 0))
+        self._status_label.grid(row=1, column=0, sticky="w", padx=PAD_X, pady=(2, 0))
 
-        # ── Navigation ─────────────────────────────────────
-        nav = ctk.CTkFrame(self, fg_color="transparent")
-        nav.grid(row=5, column=0, sticky="ew", padx=PAD_X, pady=(PAD_Y, SECTION_PAD_Y))
+        # ── Navigation (pinned; see gui.page_shell) ────────
+        nav = ctk.CTkFrame(self._footer, fg_color="transparent")
+        nav.grid(row=2, column=0, sticky="ew", padx=PAD_X, pady=(PAD_Y, PAD_Y))
         nav.grid_columnconfigure(0, weight=1)
 
         self._back_btn = ctk.CTkButton(
@@ -191,17 +208,27 @@ class ExportPanel(ctk.CTkFrame):
 
     # ── Auto-check ─────────────────────────────────────────
 
+    # Typing or browsing to a path still ticks its box. Clearing the box no
+    # longer unticks it: an empty path now means "name it for me" rather than
+    # "skip this export", so the tick is the only thing that says what the user
+    # wants. Unticking by hand is how you skip one.
     def _auto_check_csv(self, *_args):
-        self._csv_check.set(bool(self._csv_path.get().strip()))
+        if self._csv_path.get().strip():
+            self._csv_check.set(True)
 
     def _auto_check_pdf(self, *_args):
-        self._pdf_check.set(bool(self._pdf_path.get().strip()))
+        if self._pdf_path.get().strip():
+            self._pdf_check.set(True)
 
     # ── Refresh ────────────────────────────────────────────
 
     def refresh(self):
-        # Pre-populate from saved defaults (auto-check triggers via trace).
+        # Pre-populate from saved defaults (auto-check ticks via trace). Start
+        # from unticked so a page with no saved defaults does not silently
+        # request exports the user never asked for.
         defaults = self._controller.get_default_export_paths()
+        self._csv_check.set(False)
+        self._pdf_check.set(False)
         self._csv_path.set(defaults.get("csv", ""))
         self._pdf_path.set(defaults.get("pdf", ""))
         self._save_csv_default.set(False)
@@ -232,10 +259,8 @@ class ExportPanel(ctk.CTkFrame):
         csv_path = self._csv_path.get().strip() if csv_checked else ""
         pdf_path = self._pdf_path.get().strip() if pdf_checked else ""
 
-        if csv_checked and not csv_path:
-            errors.append("CSV export is checked but no path is set.")
-        if pdf_checked and not pdf_path:
-            errors.append("PDF export is checked but no path is set.")
+        # An empty box is fine: the controller names the file from the
+        # participant and date (see reports.export_naming).
         if pdf_checked and not self._controller.get_report_figures():
             errors.append("No figures available for PDF export.")
 
@@ -250,27 +275,35 @@ class ExportPanel(ctk.CTkFrame):
 
         thread = threading.Thread(
             target=self._export_worker,
-            args=(csv_path, pdf_path),
+            args=(csv_path, pdf_path, csv_checked, pdf_checked),
             daemon=True,
         )
         thread.start()
 
-    def _export_worker(self, csv_path: str, pdf_path: str):
+    def _export_worker(
+        self, csv_path: str, pdf_path: str,
+        csv_wanted: bool = True, pdf_wanted: bool = True,
+    ):
+        """Write the checked exports.
+
+        The *wanted* flags carry the checkbox state, because an empty path no
+        longer means "not requested" — it means "name it for me".
+        """
         results: list[str] = []
         try:
-            if csv_path:
+            if csv_wanted:
                 df = self._controller.get_export_dataframe()
                 if df is None:
                     raise ValueError("No DataFrame available.")
-                csv_path = self._controller.stamp_export_path(csv_path)
+                csv_path = self._controller.resolve_export_path("csv", csv_path)
                 out = Path(csv_path)
                 out.parent.mkdir(parents=True, exist_ok=True)
                 df.to_csv(out, index=False)
                 results.append(f"CSV: {out}")
 
-            if pdf_path:
+            if pdf_wanted:
                 from reports.pdf_renderer import render_figures_to_pdf
-                pdf_path = self._controller.stamp_export_path(pdf_path)
+                pdf_path = self._controller.resolve_export_path("pdf", pdf_path)
                 figures = self._controller.get_report_figures()
                 render_figures_to_pdf(figures, pdf_path)
                 self._controller.set_last_exported_pdf(pdf_path)

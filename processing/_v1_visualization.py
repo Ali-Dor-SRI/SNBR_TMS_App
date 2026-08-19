@@ -2421,6 +2421,7 @@ def plot_participant_measure_trajectory(
     value_column: str = None,
     y_label: str = None,
     title: str = None,
+    cohort_label_base: str = None,
     group_by_cortex: bool = False,
     ci_level: float = 0.95,
     output_png=None,
@@ -2558,7 +2559,10 @@ def plot_participant_measure_trajectory(
         axis.fill_between(
             band_x, band_lo, band_hi,
             color="#8290A0", alpha=0.18, zorder=1.6,
-            label=f"Cohort mean ± {ci_pct}% CI",
+            label=(
+                f"{cohort_label_base} mean ± {ci_pct}% CI" if cohort_label_base
+                else f"Cohort mean ± {ci_pct}% CI"
+            ),
         )
         all_y.extend(band_lo)
         all_y.extend(band_hi)
@@ -2874,6 +2878,8 @@ def plot_csp_profile(
     input_dir=None,
     data_df=None,
     title: str = None,
+    patient_label_base: str = None,
+    control_label_base: str = None,
     exclude_highlight_from_groups: bool = True,
     output_png=None,
     png_dpi: int = 300,
@@ -2963,9 +2969,19 @@ def plot_csp_profile(
     else:
         trace_specs.append(("Selected participant", selected_long, "#4F79C7", "#EAF0FA", 260))
 
+    # The cohort may have been narrowed to one study before it got here, so
+    # name it when the caller says which one it is.
+    patient_trace_label = (
+        f"{patient_label_base} (mean)" if patient_label_base
+        else "ALS patients (mean)"
+    )
+    control_trace_label = (
+        f"{control_label_base} (mean)" if control_label_base
+        else "Controls (mean)"
+    )
     trace_specs.extend([
-        ("ALS patients (mean)", patient_long, "#F28A2E", "#FBEEE2", 220),
-        ("Controls (mean)", control_long, "#BFC6D1", "#F4F5F7", 220),
+        (patient_trace_label, patient_long, "#F28A2E", "#FBEEE2", 220),
+        (control_trace_label, control_long, "#BFC6D1", "#F4F5F7", 220),
     ])
 
     all_values = []

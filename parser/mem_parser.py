@@ -20,6 +20,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from parser.handedness import (
+    HANDEDNESS_COLUMN,
+    HANDEDNESS_LINE_PREFIXES,
+    extract_handedness,
+)
 from parser.recording_target import (
     MUSCLE_COLUMN,
     SIDE_COLUMN,
@@ -76,7 +81,8 @@ CSP_RMT_LEVELS = ["80", "100", "120", "140", "160"]
 def output_column_order() -> list[str]:
     """Return the standard output column order for parsed MEM data."""
     return (
-        ["Study", "ID", "Date", "Age", "Sex", "Subject_type", "Stimulated_cortex",
+        ["Study", "ID", "Date", "Age", "Sex", HANDEDNESS_COLUMN,
+         "Subject_type", "Stimulated_cortex",
          MUSCLE_COLUMN, SIDE_COLUMN,
          "RMT50", "RMT200", "RMT1000"]
         + [col for level in CSP_RMT_LEVELS
@@ -106,6 +112,7 @@ def initialize_record() -> dict:
         "Date": None,
         "Age": None,
         "Sex": None,
+        HANDEDNESS_COLUMN: None,
         "Subject_type": None,
         "Stimulated_cortex": None,
         MUSCLE_COLUMN: None,
@@ -278,6 +285,14 @@ def _parse_sr_sites(stripped: str, record: dict) -> None:
 def _parse_header_field(stripped: str, record: dict) -> None:
     if stripped.startswith("S/R sites:"):
         _parse_sr_sites(stripped, record)
+        return
+    # Handedness is matched on the whole line rather than through the prefix
+    # table below: the older export format ("Subject right-handed") carries no
+    # field name, so there is no prefix to key it on.
+    if stripped.startswith(HANDEDNESS_LINE_PREFIXES):
+        hand = extract_handedness(stripped)
+        if hand is not None:
+            record[HANDEDNESS_COLUMN] = hand
         return
     for prefix, entry in _HEADER_PARSERS.items():
         if stripped.startswith(prefix):

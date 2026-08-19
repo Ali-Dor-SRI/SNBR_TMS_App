@@ -32,8 +32,17 @@ class RedcapPanel(ctk.CTkFrame):
         controller,
         on_next=None,
         on_back=None,
+        footer=None,
     ):
         super().__init__(parent, fg_color="transparent")
+        # The pinned bar at the bottom of the window (gui.page_shell.PageShell).
+        # Panels grid their Back/Next, action buttons, progress bar and status
+        # line into it so those never scroll away with the content. Falling back
+        # to a row of its own keeps a panel constructible standalone.
+        self._footer = footer
+        if self._footer is None:
+            self._footer = ctk.CTkFrame(self, fg_color="transparent")
+            self._footer.grid(row=99, column=0, sticky="ew")
         self._controller = controller
         self._on_next = on_next
         self._on_back = on_back
@@ -155,30 +164,26 @@ class RedcapPanel(ctk.CTkFrame):
         row += 1
 
         # Progress bar (hidden)
-        self._progress = ctk.CTkProgressBar(self, mode="indeterminate")
+        self._progress = ctk.CTkProgressBar(self._footer, mode="indeterminate")
         self._progress.grid(
-            row=row, column=0, sticky="ew", padx=PAD_X, pady=(0, 4),
+            row=0, column=0, sticky="ew", padx=PAD_X, pady=(PAD_Y, 0),
         )
         self._progress.grid_remove()
-        row += 1
 
         # Status
         self._status_label = ctk.CTkLabel(
-            self,
+            self._footer,
             textvariable=self._status_var,
             font=FONT_SMALL,
             text_color=DISABLED_FG,
             anchor="w",
             wraplength=600,
         )
-        self._status_label.grid(
-            row=row, column=0, sticky="w", padx=PAD_X, pady=(0, PAD_Y),
-        )
-        row += 1
+        self._status_label.grid(row=1, column=0, sticky="w", padx=PAD_X, pady=(2, 0))
 
-        # Navigation
-        nav = ctk.CTkFrame(self, fg_color="transparent")
-        nav.grid(row=row, column=0, sticky="ew", padx=PAD_X, pady=(0, SECTION_PAD_Y))
+        # Navigation (pinned; see gui.page_shell)
+        nav = ctk.CTkFrame(self._footer, fg_color="transparent")
+        nav.grid(row=2, column=0, sticky="ew", padx=PAD_X, pady=(PAD_Y, PAD_Y))
         nav.grid_columnconfigure(1, weight=1)
 
         self._back_btn = ctk.CTkButton(

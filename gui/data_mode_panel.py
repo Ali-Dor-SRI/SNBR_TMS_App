@@ -19,6 +19,35 @@ MODE_PARSE_MEM = 2
 MODE_EXISTING_CSV_FAST = 3
 
 
+def _id_mismatch_warning(attrs: dict) -> list[str]:
+    """Warn about files filed under a participant their name contradicts.
+
+    A recording whose ``Name:`` header holds the wrong subject lands on that
+    subject and vanishes from the intended one's report with no error — a
+    visit tested on both hemispheres can end up looking like a one-sided
+    visit. Naming the files is the only way staff can catch it.
+    """
+    mismatches = attrs.get("id_mismatches") or []
+    if not mismatches:
+        return []
+    shown = mismatches[:3]
+    detail = "; ".join(
+        f"{m['source_file']} is filed under ID {m['parsed_id']}"
+        f" but named for {'/'.join(str(i) for i in m['filename_ids'])}"
+        for m in shown
+    )
+    more = len(mismatches) - len(shown)
+    if more > 0:
+        detail += f"; and {more} more"
+    return [
+        f"{len(mismatches)} file(s) name one participant but were recorded "
+        f"under another — {detail}. The participant comes from the file's "
+        "'Name:' header, so these recordings are attached to the ID in the "
+        "header and are missing from the participant in the filename. Fix the "
+        "header in Qtrac (or confirm the filename is wrong) and re-parse."
+    ]
+
+
 def _missing_folder_warnings(attrs: dict) -> list[str]:
     """Warnings for data a target rebuild could not regenerate this run.
 
@@ -44,8 +73,16 @@ def _missing_folder_warnings(attrs: dict) -> list[str]:
 class DataModePanel(ctk.CTkFrame):
     """Data-import mode selection — page 2 of the workflow."""
 
-    def __init__(self, parent, controller, on_next, on_back):
+    def __init__(self, parent, controller, on_next, on_back, footer=None):
         super().__init__(parent, fg_color="transparent")
+        # The pinned bar at the bottom of the window (gui.page_shell.PageShell).
+        # Panels grid their Back/Next, action buttons, progress bar and status
+        # line into it so those never scroll away with the content. Falling back
+        # to a row of its own keeps a panel constructible standalone.
+        self._footer = footer
+        if self._footer is None:
+            self._footer = ctk.CTkFrame(self, fg_color="transparent")
+            self._footer.grid(row=99, column=0, sticky="ew")
         self._controller = controller
         self._on_next = on_next
         self._on_back = on_back
@@ -148,17 +185,17 @@ class DataModePanel(ctk.CTkFrame):
 
         # Progress bar (hidden until import starts)
         self._progress = ctk.CTkProgressBar(
-            self, mode="indeterminate", width=400,
+            self._footer, mode="indeterminate", width=400,
         )
-        self._progress.grid(row=3, column=0, padx=PAD_X, pady=(0, 4))
+        self._progress.grid(row=0, column=0, padx=PAD_X, pady=(PAD_Y, 0))
         self._progress.grid_remove()
 
         # Status / error label
         self._status_label = ctk.CTkLabel(
-            self, textvariable=self._status_var, font=FONT_SMALL,
+            self._footer, textvariable=self._status_var, font=FONT_SMALL,
             text_color=DISABLED_FG, anchor="w", wraplength=600,
         )
-        self._status_label.grid(row=4, column=0, sticky="w", padx=PAD_X, pady=(0, 2))
+        self._status_label.grid(row=1, column=0, sticky="w", padx=PAD_X, pady=(2, 0))
 
         # Info label (for "new MEM files" notice)
         self._info_label = ctk.CTkLabel(
@@ -167,9 +204,9 @@ class DataModePanel(ctk.CTkFrame):
         )
         self._info_label.grid(row=5, column=0, sticky="w", padx=PAD_X, pady=(0, PAD_Y))
 
-        # Navigation
-        nav = ctk.CTkFrame(self, fg_color="transparent")
-        nav.grid(row=6, column=0, sticky="ew", padx=PAD_X, pady=(0, SECTION_PAD_Y))
+        # Navigation (pinned; see gui.page_shell)
+        nav = ctk.CTkFrame(self._footer, fg_color="transparent")
+        nav.grid(row=2, column=0, sticky="ew", padx=PAD_X, pady=(PAD_Y, PAD_Y))
         nav.grid_columnconfigure(0, weight=1)
 
         self._back_btn = ctk.CTkButton(
@@ -314,6 +351,7 @@ class DataModePanel(ctk.CTkFrame):
                      "muscle are split into one row each. Export the archive to "
                      "keep future loads fast."]
                     + _missing_folder_warnings(attrs)
+                    + _id_mismatch_warning(attrs)
                 )
             )
             self._on_next()
@@ -321,8 +359,12 @@ class DataModePanel(ctk.CTkFrame):
 
         if attrs.get("schema_rebuilt"):
             self._info_var.set(
-                "Archive was out of date — re-parsed all visits to add newer "
-                "fields (e.g. SR/SD). Export the archive to keep future loads fast."
+                " ".join(
+                    ["Archive was out of date — re-parsed all visits to add newer "
+                     "fields (e.g. SR/SD). Export the archive to keep future loads "
+                     "fast."]
+                    + _id_mismatch_warning(attrs)
+                )
             )
             self._on_next()
             return
@@ -333,11 +375,10 @@ class DataModePanel(ctk.CTkFrame):
         if new_csp:
             parts.append(f"{new_csp} new CSP file(s)")
         if parts:
-            self._info_var.set(
-                f"Added {' and '.join(parts)} not previously in the archive."
-            )
+            message = f"Added {' and '.join(parts)} not previously in the archive."
         else:
-            self._info_var.set("No new files found — archive already up to date.")
+            message = "No new files found — archive already up to date."
+        self._info_var.set(" ".join([message] + _id_mismatch_warning(attrs)))
         self._on_next()
 
     def _on_parse_success(self, df, new_parsed):
@@ -351,7 +392,9 @@ class DataModePanel(ctk.CTkFrame):
                 f".MEM file into {rows} rows, one per visit and muscle. Export the "
                 "archive on the Export page to keep future loads fast."
             )
-            self._info_var.set(" ".join(_missing_folder_warnings(attrs)))
+            self._info_var.set(
+                " ".join(_missing_folder_warnings(attrs) + _id_mismatch_warning(attrs))
+            )
         elif attrs.get("schema_rebuilt"):
             self._status_var.set(
                 f"Archive was out of date — re-parsed all {rows} rows to add "

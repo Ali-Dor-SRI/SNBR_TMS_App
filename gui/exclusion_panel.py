@@ -31,8 +31,16 @@ _NORMAL_TEXT = ("gray10", "gray90")
 class ExclusionPanel(ctk.CTkFrame):
     """Per-test exclusion picker — sits between Data Mode and Participant."""
 
-    def __init__(self, parent, controller, on_next, on_back):
+    def __init__(self, parent, controller, on_next, on_back, footer=None):
         super().__init__(parent, fg_color="transparent")
+        # The pinned bar at the bottom of the window (gui.page_shell.PageShell).
+        # Panels grid their Back/Next, action buttons, progress bar and status
+        # line into it so those never scroll away with the content. Falling back
+        # to a row of its own keeps a panel constructible standalone.
+        self._footer = footer
+        if self._footer is None:
+            self._footer = ctk.CTkFrame(self, fg_color="transparent")
+            self._footer.grid(row=99, column=0, sticky="ew")
         self._controller = controller
         self._on_next = on_next
         self._on_back = on_back
@@ -188,9 +196,9 @@ class ExclusionPanel(ctk.CTkFrame):
             text_color=SUCCESS_COLOR, anchor="w", wraplength=700,
         ).grid(row=0, column=1, sticky="w", padx=(12, 0))
 
-        # ── Navigation ────────────────────────────────────
-        nav = ctk.CTkFrame(self, fg_color="transparent")
-        nav.grid(row=6, column=0, sticky="ew", padx=PAD_X, pady=(PAD_Y, SECTION_PAD_Y))
+        # ── Navigation (pinned; see gui.page_shell) ───────
+        nav = ctk.CTkFrame(self._footer, fg_color="transparent")
+        nav.grid(row=2, column=0, sticky="ew", padx=PAD_X, pady=(PAD_Y, PAD_Y))
         nav.grid_columnconfigure(0, weight=1)
         nav.grid_columnconfigure(2, weight=1)
 

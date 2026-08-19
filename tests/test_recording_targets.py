@@ -386,18 +386,94 @@ def test_controller_lists_the_visits_targets(tmp_path):
     ]
 
 
-def test_one_figure_per_selected_target(tmp_path):
+def test_both_sides_of_one_muscle_overlay_on_one_figure(tmp_path):
+    """A protocol run on both hemispheres belongs on one graph, not two.
+
+    The fixture's two cortical files are the same measure on the same muscle,
+    recorded once per hemisphere ("L->R" and "R->L"). Those are two traces of one
+    comparison, so they share a figure and are told apart by the stimulated-cortex
+    legend rather than being split into separate figures per side.
+    """
     controller = _multi_target_controller(tmp_path)
     controller.set_selected_targets(["Left FDI", "Right FDI"])
     figures, _axes, data = controller.generate_figure("rmt_over_time", None)
-    assert isinstance(figures, list)
-    assert data["figure_targets"] == ["Left FDI"] * len(
-        [t for t in data["figure_targets"] if t == "Left FDI"]
-    ) + ["Right FDI"] * len(
-        [t for t in data["figure_targets"] if t == "Right FDI"]
+
+    # No per-group split happened, so there are no parallel target lists — the
+    # figures here are the builder's own one-per-RMT-column split.
+    assert "figure_targets" not in data
+    assert data["figure_keys"] == ["RMT50", "RMT200", "RMT1000"]
+
+    # Both hemispheres are drawn on each figure.
+    for figure in figures:
+        legends = [ax.get_legend() for ax in figure.axes if ax.get_legend()]
+        assert legends, "expected a stimulated-cortex legend"
+        for legend in legends:
+            assert legend.get_title().get_text() == "Stimulated cortex"
+            assert sorted(t.get_text() for t in legend.get_texts()) == ["L", "R"]
+
+
+def test_overlaid_figure_titles_name_the_muscle_without_a_side(tmp_path):
+    """The sides are in the legend, so repeating one in the title would mislead."""
+    controller = _multi_target_controller(tmp_path)
+    controller.set_selected_targets(["Left FDI", "Right FDI"])
+    assert controller._target_suffix() == "FDI"
+
+    controller.set_selected_targets(["Left FDI"])
+    assert controller._target_suffix() == "Left FDI"
+
+
+def test_different_muscles_still_get_separate_figures(tmp_path):
+    """Grouping is per muscle: a hand and a leg recording are not one comparison."""
+    controller = _multi_target_controller(tmp_path)
+    controller.set_selected_targets(["Left FDI", "Right FDI", "Right TA"])
+    groups = controller._group_targets_by_muscle(
+        ["Left FDI", "Right FDI", "Right TA"]
     )
-    assert set(data["figure_targets"]) == {"Left FDI", "Right FDI"}
-    assert len(data["figure_data"]) == len(figures)
+    assert groups == [("FDI", ["Left FDI", "Right FDI"]), ("Right TA", ["Right TA"])]
+
+
+def test_cortex_fallback_renders_profiles_with_both_sides_selected(tmp_path):
+    """The pre-recording-target path must not hand profiles a flag they reject.
+
+    An archive with no muscle data falls back to the Stimulated Cortex selector,
+    and picking both sides used to raise
+    ``TypeError: plot_measure_profile() got an unexpected keyword argument
+    'group_by_cortex'`` — the profile builders overlay the hemispheres by
+    detecting them, and take no such argument.
+    """
+    from gui.controller import AppController
+
+    # Both hemispheres, each carrying T-SICI so the profile has something to draw.
+    _cortical(tmp_path, "SNBR-001-A-TP1C60112A.MEM", stim="L->R", muscle="FDI",
+              values=_TSICI.format(v=-5.0))
+    _cortical(tmp_path, "SNBR-001-B-TP1C60112B.MEM", stim="R->L", muscle="FDI",
+              values=_TSICI.format(v=-9.0))
+    controller = AppController()
+    controller.set_dataframe(build_combined_dataframe(tmp_path))
+    controller._mem_paths = []
+    controller.set_selected_participant(1, datetime(2026, 1, 12))
+    controller.set_selected_targets([])
+    controller.set_selected_cortex(["L", "R"])
+
+    figure, _axis, _data = controller.generate_figure("profile", "t_sici")
+    assert figure is not None
+
+    assert "profile" in controller._CORTEX_OVERLAY_AUTODETECT_TYPES
+    assert "profile" not in controller._GRAPH_TYPE_NEEDS_CORTEX_OVERLAY
+
+
+def test_peripheral_graphs_stay_one_figure_per_side(tmp_path):
+    """A left-APB recruitment curve is a different recording, not another hemisphere.
+
+    The peripheral curves carry no stimulated cortex to label overlaid traces
+    by, so they keep splitting per recorded side.
+    """
+    controller = _multi_target_controller(tmp_path)
+    assert "stimulus_response" in controller._PER_SIDE_GRAPH_TYPES
+    assert "strength_duration_curve" in controller._PER_SIDE_GRAPH_TYPES
+    # ...while the cortical protocols are grouped per muscle.
+    assert "rmt_over_time" not in controller._PER_SIDE_GRAPH_TYPES
+    assert "grouped" not in controller._PER_SIDE_GRAPH_TYPES
 
 
 def test_targets_without_data_are_skipped_not_fatal(tmp_path):
@@ -486,3 +562,104 @@ def test_redcap_dedup_prefers_the_hand_recording():
         .drop_duplicates(subset=["ID", "date_iso"], keep="first")
     )
     assert kept[MUSCLE_COLUMN].tolist() == ["FDI"]
+
+
+# --------------------------------------------------------------------------
+# Mislabelled files: the filename names one participant, the header another
+# --------------------------------------------------------------------------
+
+def test_filename_participant_ids_reads_the_labelled_number():
+    from processing.df_builder import filename_participant_ids
+
+    assert filename_participant_ids("SNBR-080-FU-RCX-TP3C60818B.MEM") == {80}
+    assert filename_participant_ids("CSP-RAW-SNBR-095-TH2C40801A.MEM") == {95}
+    assert filename_participant_ids("AA-SNBR-174_S1_TD2C60112A.MEM") == {174}
+    assert filename_participant_ids("QUARTS-007_TX DAY3 LCX AM_QP2C31213A.MEM") == {7}
+    # "AASNBR-080" must not be read as the "SNBR-080" nested inside it twice over.
+    assert filename_participant_ids("AASNBR-080-x.MEM") == {80}
+
+
+def test_filename_with_no_participant_label_claims_nothing():
+    """Most Qtrac exports are named by acquisition code, not by subject."""
+    from processing.df_builder import filename_participant_ids
+
+    assert filename_participant_ids("TMSC20802A TSICI ASICI.MEM") == set()
+    assert filename_participant_ids("TD2C60112A.MEM") == set()
+    assert filename_participant_ids("") == set()
+
+
+def test_mislabelled_file_is_reported_not_reassigned(tmp_path):
+    """A wrong subject in the header hides the recording, silently, until now.
+
+    Both files below are one session's two hemispheres, but the second was saved
+    in Qtrac under the wrong subject. It files itself under that subject and
+    disappears from the intended participant's report, so the visit looks
+    single-sided. Nothing is reassigned — which of the two is right is a lab
+    decision — but the disagreement is reported.
+    """
+    from processing.df_builder import detect_participant_id_mismatches
+    from gui.controller import AppController
+
+    _cortical(tmp_path, "SNBR-080-FU-LCX-TP3C60818A.MEM", pid=80,
+              stim="L->R", muscle="FDI", values=_RMT.format(v=50))
+    # Same session, other hemisphere — but the header says SNBR-213.
+    _cortical(tmp_path, "SNBR-080-FU-RCX-TP3C60818B.MEM", pid=213,
+              stim="R->L", muscle="FDI", values=_RMT.format(v=70))
+
+    df = build_combined_dataframe(tmp_path)
+    mismatches = detect_participant_id_mismatches(df)
+    assert len(mismatches) == 1
+    found = mismatches[0]
+    assert found["source_file"] == "SNBR-080-FU-RCX-TP3C60818B.MEM"
+    assert found["parsed_id"] == 213
+    assert found["filename_ids"] == [80]
+
+    # The header still wins — the row stays under 213, unreassigned.
+    assert 213 in set(pd.to_numeric(df["ID"], errors="coerce").dropna().astype(int))
+
+    # ...and the controller exposes it for the import page to surface.
+    controller = AppController()
+    controller.set_dataframe(df)
+    assert len(controller.get_id_mismatches()) == 1
+
+
+def test_correctly_labelled_files_raise_no_mismatch(tmp_path):
+    from processing.df_builder import detect_participant_id_mismatches
+
+    _cortical(tmp_path, "SNBR-080-FU-LCX-TP3C60818A.MEM", pid=80,
+              stim="L->R", muscle="FDI", values=_RMT.format(v=50))
+    _cortical(tmp_path, "SNBR-080-FU-RCX-TP3C60818B.MEM", pid=80,
+              stim="R->L", muscle="FDI", values=_RMT.format(v=70))
+
+    df = build_combined_dataframe(tmp_path)
+    assert detect_participant_id_mismatches(df) == []
+
+
+def test_corrected_session_shows_both_hemispheres_on_one_figure(tmp_path):
+    """With the label fixed, the two hemispheres land on one overlaid figure."""
+    from gui.controller import AppController
+
+    _cortical(tmp_path, "SNBR-080-FU-LCX-TP3C60818A.MEM", pid=80,
+              stim="L->R", muscle="FDI", values=_RMT.format(v=50))
+    _cortical(tmp_path, "SNBR-080-FU-RCX-TP3C60818B.MEM", pid=80,
+              stim="R->L", muscle="FDI", values=_RMT.format(v=70))
+
+    controller = AppController()
+    controller.set_dataframe(build_combined_dataframe(tmp_path))
+    controller._mem_paths = []
+    controller.set_selected_participant(80, datetime(2026, 1, 12))
+
+    targets = controller.get_target_options(80, datetime(2026, 1, 12))
+    assert targets == ["Left FDI", "Right FDI"]
+    assert controller._group_targets_by_muscle(targets) == [
+        ("FDI", ["Left FDI", "Right FDI"])
+    ]
+
+    controller.set_selected_targets(targets)
+    figures, _axes, data = controller.generate_figure("rmt_over_time", None)
+    assert "figure_targets" not in data  # one muscle, so no per-group split
+    for figure in figures:
+        for axis in figure.axes:
+            legend = axis.get_legend()
+            if legend:
+                assert sorted(t.get_text() for t in legend.get_texts()) == ["L", "R"]

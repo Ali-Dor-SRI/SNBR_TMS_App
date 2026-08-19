@@ -18,6 +18,7 @@ from gui.visualization_panel import VisualizationPanel
 from gui.welcome_panel import WelcomePanel
 from gui.redcap_panel import RedcapPanel
 from gui.settings_panel import SettingsPanel
+from gui.page_shell import PageShell
 from gui.theme import (
     FONT_SMALL, FONT_BUTTON, FONT_BODY, FONT_HEADING, FONT_TITLE,
     ACCENT_COLOR, ACCENT_HOVER, ERROR_COLOR, SUCCESS_COLOR, DISABLED_FG,
@@ -62,6 +63,9 @@ class TMSApp(ctk.CTk):
 
         self._controller = AppController()
         self._pages: dict[str, ctk.CTkFrame] = {}
+        # One PageShell per page — the frame actually raised by _show_page.
+        # self._pages holds the panels themselves, which sit inside them.
+        self._shells: dict[str, PageShell] = {}
         self._current_page: str = ""
         self._previous_page: str = ""
 
@@ -151,138 +155,179 @@ class TMSApp(ctk.CTk):
         ctk.set_appearance_mode(mode)
 
     # ── Page container ─────────────────────────────────────
+    def _add_page(self, name: str, factory, scrolling: bool = True):
+        """Build one page inside its own shell and register both.
+
+        *factory* receives the content parent and the footer frame, and returns
+        the panel. The panel grids its own controls into that footer.
+        """
+        shell = PageShell(self._container, scrolling=scrolling)
+        shell.grid(row=0, column=0, sticky="nsew")
+        page = factory(shell.content, shell.footer)
+        page.grid(row=0, column=0, sticky="nsew")
+        shell.finalize()
+        self._pages[name] = page
+        self._shells[name] = shell
+        return page
+
     def _build_container(self):
-        self._scroll_container = ctk.CTkScrollableFrame(
-            self, fg_color="transparent", corner_radius=0,
-        )
-        self._scroll_container.pack(fill="both", expand=True)
-        self._scroll_container.grid_rowconfigure(0, weight=1)
-        self._scroll_container.grid_columnconfigure(0, weight=1)
-        self._container = self._scroll_container
+        # Pages are no longer wrapped in one window-wide scroller. Each gets a
+        # PageShell that scrolls its own content and pins its Back/Next bar to
+        # the bottom of the window, so the controls never scroll out of reach.
+        self._container = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
+        self._container.pack(fill="both", expand=True)
+        self._container.grid_rowconfigure(0, weight=1)
+        self._container.grid_columnconfigure(0, weight=1)
+
 
         # Page 0 — welcome
-        welcome = WelcomePanel(
-            self._container,
-            controller=self._controller,
-            on_done=lambda: self._show_page("finish"),
-            on_custom=lambda: self._show_page("file_panel"),
-            on_redirect=lambda name: self._show_page(name),
+        self._add_page(
+            "welcome",
+            lambda parent, footer: WelcomePanel(
+                parent,
+                footer=footer,
+                controller=self._controller,
+                on_done=lambda: self._show_page("finish"),
+                on_custom=lambda: self._show_page("file_panel"),
+                on_redirect=lambda name: self._show_page(name),
+            ),
         )
-        welcome.grid(row=0, column=0, sticky="nsew")
-        self._pages["welcome"] = welcome
 
         # Pages 1-9 use computed linear navigation: Next/Back move to the next
         # or previous page that the user has NOT chosen to skip (see
         # _next_page / _prev_page). With no skips this is the plain 1→2→3 flow.
 
         # Page 1 — path selection
-        file_panel = FilePanel(
-            self._container,
-            controller=self._controller,
-            on_next=lambda: self._show_page(self._next_page("file_panel")),
-            on_back=lambda: self._show_page(self._prev_page("file_panel")),
+        self._add_page(
+            "file_panel",
+            lambda parent, footer: FilePanel(
+                parent,
+                footer=footer,
+                controller=self._controller,
+                on_next=lambda: self._show_page(self._next_page("file_panel")),
+                on_back=lambda: self._show_page(self._prev_page("file_panel")),
+            ),
         )
-        file_panel.grid(row=0, column=0, sticky="nsew")
-        self._pages["file_panel"] = file_panel
 
         # Page 2 — data import mode
-        data_mode = DataModePanel(
-            self._container,
-            controller=self._controller,
-            on_next=lambda: self._show_page(self._next_page("data_mode")),
-            on_back=lambda: self._show_page(self._prev_page("data_mode")),
+        self._add_page(
+            "data_mode",
+            lambda parent, footer: DataModePanel(
+                parent,
+                footer=footer,
+                controller=self._controller,
+                on_next=lambda: self._show_page(self._next_page("data_mode")),
+                on_back=lambda: self._show_page(self._prev_page("data_mode")),
+            ),
         )
-        data_mode.grid(row=0, column=0, sticky="nsew")
-        self._pages["data_mode"] = data_mode
 
         # Page 3 — exclude participants from averages (skippable)
-        exclusion = ExclusionPanel(
-            self._container,
-            controller=self._controller,
-            on_next=lambda: self._show_page(self._next_page("exclusion")),
-            on_back=lambda: self._show_page(self._prev_page("exclusion")),
+        self._add_page(
+            "exclusion",
+            lambda parent, footer: ExclusionPanel(
+                parent,
+                footer=footer,
+                controller=self._controller,
+                on_next=lambda: self._show_page(self._next_page("exclusion")),
+                on_back=lambda: self._show_page(self._prev_page("exclusion")),
+            ),
         )
-        exclusion.grid(row=0, column=0, sticky="nsew")
-        self._pages["exclusion"] = exclusion
 
         # Page 4 — participant / visit date selection
-        participant = ParticipantPanel(
-            self._container,
-            controller=self._controller,
-            on_next=lambda: self._show_page(self._next_page("participant")),
-            on_back=lambda: self._show_page(self._prev_page("participant")),
+        self._add_page(
+            "participant",
+            lambda parent, footer: ParticipantPanel(
+                parent,
+                footer=footer,
+                controller=self._controller,
+                on_next=lambda: self._show_page(self._next_page("participant")),
+                on_back=lambda: self._show_page(self._prev_page("participant")),
+            ),
         )
-        participant.grid(row=0, column=0, sticky="nsew")
-        self._pages["participant"] = participant
 
         # Page 5 — visualization selection & preview
-        visualization = VisualizationPanel(
-            self._container,
-            controller=self._controller,
-            on_next=lambda: self._show_page(self._next_page("visualization")),
-            on_back=lambda: self._show_page(self._prev_page("visualization")),
+        self._add_page(
+            "visualization",
+            lambda parent, footer: VisualizationPanel(
+                parent,
+                footer=footer,
+                controller=self._controller,
+                on_next=lambda: self._show_page(self._next_page("visualization")),
+                on_back=lambda: self._show_page(self._prev_page("visualization")),
+            ),
+            scrolling=False,
         )
-        visualization.grid(row=0, column=0, sticky="nsew")
-        self._pages["visualization"] = visualization
 
         # Page 6 — export
-        export = ExportPanel(
-            self._container,
-            controller=self._controller,
-            on_next=lambda: self._show_page(self._next_page("export")),
-            on_back=lambda: self._show_page(self._prev_page("export")),
+        self._add_page(
+            "export",
+            lambda parent, footer: ExportPanel(
+                parent,
+                footer=footer,
+                controller=self._controller,
+                on_next=lambda: self._show_page(self._next_page("export")),
+                on_back=lambda: self._show_page(self._prev_page("export")),
+            ),
         )
-        export.grid(row=0, column=0, sticky="nsew")
-        self._pages["export"] = export
 
         # Page 7 — Email report (skippable)
-        email = EmailPanel(
-            self._container,
-            controller=self._controller,
-            on_next=lambda: self._show_page(self._next_page("email")),
-            on_back=lambda: self._show_page(self._prev_page("email")),
+        self._add_page(
+            "email",
+            lambda parent, footer: EmailPanel(
+                parent,
+                footer=footer,
+                controller=self._controller,
+                on_next=lambda: self._show_page(self._next_page("email")),
+                on_back=lambda: self._show_page(self._prev_page("email")),
+            ),
         )
-        email.grid(row=0, column=0, sticky="nsew")
-        self._pages["email"] = email
 
         # Page 8 — REDCap export (skippable)
-        redcap = RedcapPanel(
-            self._container,
-            controller=self._controller,
-            on_next=lambda: self._show_page(self._next_page("redcap")),
-            on_back=lambda: self._show_page(self._prev_page("redcap")),
+        self._add_page(
+            "redcap",
+            lambda parent, footer: RedcapPanel(
+                parent,
+                footer=footer,
+                controller=self._controller,
+                on_next=lambda: self._show_page(self._next_page("redcap")),
+                on_back=lambda: self._show_page(self._prev_page("redcap")),
+            ),
         )
-        redcap.grid(row=0, column=0, sticky="nsew")
-        self._pages["redcap"] = redcap
 
         # Page 9 — backup & sync (skippable)
-        sync = SyncPanel(
-            self._container,
-            controller=self._controller,
-            on_next=lambda: self._show_page(self._next_page("sync")),
-            on_back=lambda: self._show_page(self._prev_page("sync")),
+        self._add_page(
+            "sync",
+            lambda parent, footer: SyncPanel(
+                parent,
+                footer=footer,
+                controller=self._controller,
+                on_next=lambda: self._show_page(self._next_page("sync")),
+                on_back=lambda: self._show_page(self._prev_page("sync")),
+            ),
         )
-        sync.grid(row=0, column=0, sticky="nsew")
-        self._pages["sync"] = sync
 
         # Page 10 — finish (restart or close)
-        finish = FinishPanel(
-            self._container,
-            controller=self._controller,
-            on_restart=lambda: self._show_page("participant"),
-            on_back=lambda: self._show_page(self._prev_page("finish")),
+        self._add_page(
+            "finish",
+            lambda parent, footer: FinishPanel(
+                parent,
+                footer=footer,
+                controller=self._controller,
+                on_restart=lambda: self._show_page("participant"),
+                on_back=lambda: self._show_page(self._prev_page("finish")),
+            ),
         )
-        finish.grid(row=0, column=0, sticky="nsew")
-        self._pages["finish"] = finish
 
         # Settings (not in page order — accessed via toolbar)
-        settings = SettingsPanel(
-            self._container,
-            controller=self._controller,
-            on_back=self._return_from_settings,
+        self._add_page(
+            "settings",
+            lambda parent, footer: SettingsPanel(
+                parent,
+                footer=footer,
+                controller=self._controller,
+                on_back=self._return_from_settings,
+            ),
         )
-        settings.grid(row=0, column=0, sticky="nsew")
-        self._pages["settings"] = settings
 
     def _show_page(self, name: str):
         """Raise the requested page to the front."""
@@ -292,7 +337,9 @@ class TMSApp(ctk.CTk):
         page = self._pages[name]
         if hasattr(page, "refresh"):
             page.refresh()
-        page.tkraise()
+        # The shell carries the page's pinned footer, so raising the panel alone
+        # would leave the previous page's Back/Next bar on top.
+        self._shells[name].tkraise()
         # Sync the toolbar dropdown to the current page
         label = _NAME_TO_LABEL.get(name)
         if label and hasattr(self, "_jump_var"):

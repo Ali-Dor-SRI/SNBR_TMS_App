@@ -27,6 +27,7 @@ from parser.mem_parser import (
     TSICI_ISIS,
     TSICF_ISIS,
 )
+from parser.handedness import HANDEDNESS_COLUMN
 from parser.sr_parser import SR_CURVE_COLUMN
 from parser.strength_duration_parser import (
     SD_POINTS_COLUMN,
@@ -186,8 +187,11 @@ _INTERNAL_ONLY_COLUMNS = (
     # Strength-duration scalars + the persisted SR/SD plot data (JSON): kept in
     # the internal DataFrame / CSV only, with no REDCap counterpart.
     + [SD_RHEOBASE_COLUMN, SD_TAU_COLUMN, SR_CURVE_COLUMN, SD_POINTS_COLUMN]
-    # Metadata columns that don't map directly to REDCap TMS fields
-    + ["Study", "Subject_type", "source_file"]
+    # Metadata columns that don't map directly to REDCap TMS fields.
+    # Handedness is read from the .MEM header to pick which hemisphere feeds
+    # cohort averages (see processing.cohort_filters); REDCap has no field
+    # for it.
+    + ["Study", "Subject_type", HANDEDNESS_COLUMN, "source_file"]
 )
 
 # Completion-gate yesno fields on the tms_values form. REDCap branching

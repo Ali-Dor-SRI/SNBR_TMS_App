@@ -19,6 +19,13 @@ from __future__ import annotations
 import pandas as pd
 
 from parser.recording_target import MUSCLE_COLUMN, SIDE_COLUMN, target_label
+from processing.cohort_filters import (
+    cohort_label_bases,
+    cohort_scope_label,
+    participant_study,
+    restrict_cohort_to_analysis_cortex,
+    restrict_cohort_to_study,
+)
 from processing.df_builder import restrict_participant_to_target, target_labels_in
 from reports.captions import (
     caption_for,
@@ -29,6 +36,8 @@ from reports.captions import (
 from reports.pdf_layout import ReportItem, generation_date_string
 from processing.visualizer import (
     CSP_MEASURE_LABEL,
+    CSP_PROFILE_COLUMNS,
+    RMT_COLUMNS,
     VISIT_TABLE_COLUMN_WIDTHS,
     apply_visit_summary_table_layout,
     build_participant_visit_test_summary,
@@ -1062,6 +1071,58 @@ def build_header_only_figure(
 # Group-comparison figure builders with message fallback
 # ---------------------------------------------------------------------------
 
+def _measure_value_columns(measure) -> list:
+    """Return the wide value columns one waveform measure plots."""
+    config = waveform_measure_config(measure)
+    return (
+        [f"{config['prefix']}_{isi}" for isi in config['isis']]
+        + [config['avg_column']]
+    )
+
+
+def visit_cortices(df, pid, visit_date=None) -> list:
+    """Return the hemispheres one participant-visit was stimulated on.
+
+    Two values mean the protocol was run on each hemisphere and the traces
+    should be overlaid and labelled by cortex, matching what the GUI's
+    Visualization page draws for the same visit.
+    """
+    if df is None or df.empty or "Stimulated_cortex" not in df.columns:
+        return []
+    rows = df[pd.to_numeric(df["ID"], errors="coerce") == pid]
+    if visit_date is not None and "Date" in rows.columns:
+        rows = rows[rows["Date"].astype("string").str.strip() == str(visit_date).strip()]
+    values = (
+        rows["Stimulated_cortex"].astype("string")
+        .fillna("").str.strip().replace("", pd.NA).dropna().unique()
+    )
+    return sorted(str(v) for v in values)
+
+
+def _cortex_highlight_kwargs(df, pid, visit_date=None) -> dict:
+    """``highlight_cortex_values`` for a grouped plot, or nothing to add."""
+    cortices = visit_cortices(df, pid, visit_date)
+    return {"highlight_cortex_values": cortices} if len(cortices) > 1 else {}
+
+
+def _study_cohort(df, pid, value_columns, visit_date=None):
+    """Narrow a reference cohort to the participant's study, and name it.
+
+    Returns ``(dataframe, patient_label_base, control_label_base, scope)``. The
+    hemisphere restriction is applied once by ``build_report_figures``; this
+    is the per-measure half, because a study whose controls recorded nothing
+    for *this* measure has to fall back to the pooled cohort just as one with
+    no controls at all does.  Mirrors ``AppController._cohort_restricted_df``
+    so the GUI and scripted report paths draw the same cohort.
+    """
+    study = participant_study(df, pid, visit_date=visit_date)
+    cohort_df, applied = restrict_cohort_to_study(
+        df, study, exempt_id=pid, value_columns=value_columns,
+    )
+    patient_label, control_label = cohort_label_bases(study, applied)
+    return cohort_df, patient_label, control_label, cohort_scope_label(study, applied)
+
+
 def _group_plot_title(label, anchor_date, comparison):
     return f"{label} | Latest visit vs {comparison} | {anchor_date}"
 
@@ -1081,10 +1142,16 @@ def _measure_group_or_message(
 ) -> list[ReportItem]:
     mlabel = waveform_measure_config(measure)["label"]
     title = _group_plot_title(label, anchor, f"{mlabel} vs {comp}")
+    cohort_df, patient_label, control_label, _ = _study_cohort(
+        df, pid, _measure_value_columns(measure), visit_date=anchor,
+    )
     try:
         fig, _, plot_data = plot_measure_grouped_graph(
             measure=measure, participant_id=pid, mem_date=anchor,
-            data_df=df, match_by=match_by, age_window=age_window,
+            data_df=cohort_df, match_by=match_by, age_window=age_window,
+            patient_label_base=patient_label,
+            control_label_base=control_label,
+            **_cortex_highlight_kwargs(cohort_df, pid, anchor),
             title=title, show=show,
         )
     except ValueError as exc:
@@ -1101,10 +1168,16 @@ def _rmt_group_or_message(
     age_window=5, show=False, skip=False,
 ) -> list[ReportItem]:
     title = _group_plot_title(label, anchor, f"RMT vs {comp}")
+    cohort_df, patient_label, control_label, _ = _study_cohort(
+        df, pid, list(RMT_COLUMNS), visit_date=anchor,
+    )
     try:
         figs, _, plot_data = plot_rmt_grouped_graph(
-            participant_id=pid, mem_date=anchor, data_df=df,
+            participant_id=pid, mem_date=anchor, data_df=cohort_df,
             match_by=match_by, age_window=age_window,
+            patient_label_base=patient_label,
+            control_label_base=control_label,
+            **_cortex_highlight_kwargs(cohort_df, pid, anchor),
             title=title, show=show,
         )
     except ValueError as exc:
@@ -1127,10 +1200,16 @@ def _csp_group_or_message(
     age_window=5, show=False, skip=False,
 ) -> list[ReportItem]:
     title = _group_plot_title(label, anchor, f"{CSP_MEASURE_LABEL} vs {comp}")
+    cohort_df, patient_label, control_label, _ = _study_cohort(
+        df, pid, list(CSP_PROFILE_COLUMNS), visit_date=anchor,
+    )
     try:
         fig, _, plot_data = plot_csp_grouped_graph(
-            participant_id=pid, mem_date=anchor, data_df=df,
+            participant_id=pid, mem_date=anchor, data_df=cohort_df,
             match_by=match_by, age_window=age_window,
+            patient_label_base=patient_label,
+            control_label_base=control_label,
+            **_cortex_highlight_kwargs(cohort_df, pid, anchor),
             title=title, show=show,
         )
     except ValueError as exc:
@@ -1400,6 +1479,19 @@ def build_report_figures(
         # recording here puts it on all of them at once.
         plabel = f"{plabel} ({recording_target})"
     skip_missing = requests_all_report_sections(included_sections)
+
+    # Every reference-cohort member contributes one hemisphere (the one driving
+    # their dominant hand), so a participant tested on both sides does not count
+    # twice in the averages. The selected participant is exempt, so their own
+    # both-cortex traces still overlay on their graphs. Placed after *anchor* is
+    # known because the exemption is keyed on (study, ID), and only a visit date
+    # tells apart the same participant number in two different studies. The
+    # matching per-study restriction is applied per measure in _study_cohort.
+    resolved_df = restrict_cohort_to_analysis_cortex(
+        resolved_df,
+        exempt_id=resolved_id,
+        exempt_study=participant_study(resolved_df, resolved_id, visit_date=anchor),
+    )
     section_keys = normalize_report_sections(included_sections)
 
     # Omit all date-dependent sections when no valid dates exist
@@ -1469,6 +1561,44 @@ def build_report_figures(
             return latest_visit_caption(summary, metric_label=plot_data.get("value_column"))
         return None
 
+    def _cortex_split_kwargs() -> dict:
+        """``group_by_cortex`` for the participant-only longitudinal plots.
+
+        The profile builders detect the split themselves and take no such
+        argument, so they are deliberately not given these kwargs.
+        """
+        return (
+            {"group_by_cortex": True}
+            if len(visit_cortices(resolved_df, resolved_id)) > 1
+            else {}
+        )
+
+    def _csp_profile_cohort_kwargs() -> dict:
+        """data_df + cohort labels for the CSP profile's two mean traces."""
+        cohort_df, patient_label, control_label, _ = _study_cohort(
+            resolved_df, resolved_id, list(CSP_PROFILE_COLUMNS),
+            visit_date=anchor,
+        )
+        return {
+            "data_df": cohort_df,
+            "patient_label_base": patient_label,
+            "control_label_base": control_label,
+        }
+
+    def _trajectory_cohort_kwargs(measure) -> dict:
+        """data_df + label for the trajectory's single cohort band.
+
+        The band pools one subject type rather than splitting into patient and
+        control, so it is named by scope. The study restriction is judged the
+        same way as every other figure in the report, which keeps one report's
+        figures describing one cohort.
+        """
+        cohort_df, _, _, scope = _study_cohort(
+            resolved_df, resolved_id, _measure_value_columns(measure),
+            visit_date=anchor,
+        )
+        return {"data_df": cohort_df, "cohort_label_base": scope}
+
     # --- section builders ---
     builders: dict = {
         "summary": lambda: _simple_item(
@@ -1527,6 +1657,7 @@ def build_report_figures(
             f"{plabel} | RMT thresholds over time",
             lambda: plot_participant_rmt_over_time(
                 participant_id=resolved_id, data_df=resolved_df,
+                **_cortex_split_kwargs(),
                 title=f"{plabel} | RMT thresholds over time", show=show,
             ),
             caption_fn=_over_time_caption_fn,
@@ -1555,7 +1686,8 @@ def build_report_figures(
             "csp_profile",
             f"{plabel} | {CSP_MEASURE_LABEL} profile",
             lambda: plot_csp_profile(
-                participant_id=resolved_id, mem_date=anchor, data_df=resolved_df,
+                participant_id=resolved_id, mem_date=anchor,
+                **_csp_profile_cohort_kwargs(),
                 title=f"{plabel} | {CSP_MEASURE_LABEL} profile | {anchor}", show=show,
             ),
             caption_fn=lambda pd_, _k: csp_profile_caption(pd_),
@@ -1584,6 +1716,7 @@ def build_report_figures(
             f"{plabel} | {CSP_MEASURE_LABEL} duration over time",
             lambda: plot_participant_csp_over_time(
                 participant_id=resolved_id, data_df=resolved_df,
+                **_cortex_split_kwargs(),
                 title=f"{plabel} | {CSP_MEASURE_LABEL} duration over time", show=show,
             ),
             caption_fn=_over_time_caption_fn,
@@ -1593,6 +1726,7 @@ def build_report_figures(
             f"{plabel} | {CSP_MEASURE_LABEL} profile by visit",
             lambda: plot_participant_csp_visit_profiles(
                 participant_id=resolved_id, data_df=resolved_df,
+                **_cortex_split_kwargs(),
                 title=f"{plabel} | {CSP_MEASURE_LABEL} profile by visit", show=show,
             ),
             caption_fn=None,
@@ -1605,7 +1739,9 @@ def build_report_figures(
         "t_sici_trajectory",
         f"{plabel} | T-SICI trajectory vs cohort",
         lambda: plot_participant_measure_trajectory(
-            measure="t_sici", participant_id=resolved_id, data_df=resolved_df,
+            measure="t_sici", participant_id=resolved_id,
+            **_trajectory_cohort_kwargs("t_sici"),
+            **_cortex_split_kwargs(),
             title=f"{plabel} | T-SICI trajectory vs cohort", show=show,
         ),
         caption_fn=lambda pd_, k: caption_for("trajectory", "t_sici", pd_, k),
@@ -1620,6 +1756,7 @@ def build_report_figures(
                 f"{plabel} | Averaged {mt} over time",
                 lambda mk=mk, mt=mt: plot_participant_measure_over_time(
                     measure=mk, participant_id=resolved_id, data_df=resolved_df,
+                    **_cortex_split_kwargs(),
                     title=f"{plabel} | Averaged {mt} over time", show=show,
                 ),
                 caption_fn=_over_time_caption_fn,
@@ -1631,6 +1768,7 @@ def build_report_figures(
                 f"{plabel} | {mt} profile by visit",
                 lambda mk=mk, mt=mt: plot_participant_measure_visit_profiles(
                     measure=mk, participant_id=resolved_id, data_df=resolved_df,
+                    **_cortex_split_kwargs(),
                     title=f"{plabel} | {mt} profile by visit", show=show,
                 ),
                 caption_fn=None,

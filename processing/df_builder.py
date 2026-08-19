@@ -563,6 +563,107 @@ def restrict_participant_to_target(
     return df[~is_participant | (labels == target) | (labels == "")]
 
 
+# ---------------------------------------------------------------------------
+# Mislabelled-file detection
+# ---------------------------------------------------------------------------
+
+# Study tokens a .MEM filename may carry before the participant number, longest
+# first so "AASNBR-080" is not read as the "SNBR-080" nested inside it.
+_FILENAME_STUDY_TOKENS = (
+    "AASNBR", "SNBR", "NIALS", "NIAL", "NAILS", "QUARTS", "QUART", "TMS",
+)
+_FILENAME_ID_PATTERN = re.compile(
+    r"(?:" + "|".join(_FILENAME_STUDY_TOKENS) + r")[-_ ]?0*(\d+)",
+    flags=re.IGNORECASE,
+)
+
+
+def filename_participant_ids(filename) -> set:
+    """Return the participant numbers a .MEM filename names.
+
+    Empty when the name carries no ``<study><number>`` token at all — many Qtrac
+    exports are named only by their acquisition code (``TMSC20802A.MEM``), and a
+    file that never claims a participant cannot contradict one.
+    """
+    stem = Path(str(filename or "")).stem
+    found = set()
+    for match in _FILENAME_ID_PATTERN.finditer(stem):
+        try:
+            found.add(int(match.group(1)))
+        except ValueError:
+            continue
+    return found
+
+
+def detect_participant_id_mismatches(df: pd.DataFrame) -> list:
+    """Return rows whose parsed participant ID contradicts their filename.
+
+    ``parse_mem_file`` takes the participant from the file's ``Name:`` header and
+    falls back to the filename only when the header has none — the right order,
+    since the header is what the operator recorded at acquisition. But when an
+    operator types the wrong subject into Qtrac, the recording silently files
+    itself under another participant and simply goes missing from the intended
+    one's report: a visit tested on both hemispheres can arrive looking like a
+    single-hemisphere visit, with no error anywhere.
+
+    This reports the disagreement so it can be surfaced instead. Nothing is
+    reassigned — which of the two is right is a lab decision, not a guess this
+    code can make.
+
+    Each entry is ``{"source_file", "parsed_id", "filename_ids", "date",
+    "cortex"}``.
+    """
+    if df is None or df.empty or "source_file" not in df.columns:
+        return []
+
+    ids = pd.to_numeric(df.get("ID"), errors="coerce")
+    mismatches = []
+    for idx, raw_files in df["source_file"].items():
+        parsed_id = ids.get(idx)
+        if pd.isna(parsed_id):
+            continue
+        for name in _split_source_files(raw_files):
+            named = filename_participant_ids(name)
+            if named and int(parsed_id) not in named:
+                mismatches.append({
+                    "source_file": name,
+                    "parsed_id": int(parsed_id),
+                    "filename_ids": sorted(named),
+                    "date": df.at[idx, "Date"] if "Date" in df.columns else None,
+                    "cortex": (
+                        df.at[idx, "Stimulated_cortex"]
+                        if "Stimulated_cortex" in df.columns else None
+                    ),
+                })
+    return mismatches
+
+
+def restrict_participant_to_muscle(
+    df: pd.DataFrame, participant_id, muscle: str | None,
+) -> pd.DataFrame:
+    """Return *df* with one participant's rows restricted to one muscle.
+
+    The side is deliberately *not* filtered: a visit tested on both
+    hemispheres records the same muscle on the left and the right, and those
+    two traces belong on one figure together (overlaid, labelled by stimulated
+    cortex) rather than on two separate figures.  Use
+    :func:`restrict_participant_to_target` when a single side is wanted.
+
+    As there, only the selected participant is filtered — reference cohorts
+    stay pooled across muscles — and the participant's rows that carry no
+    muscle at all are kept, since they hold visit-level data (the CMAP/MUNIX
+    tables) that belongs to the visit rather than to any one muscle.
+    """
+    if not muscle or MUSCLE_COLUMN not in df.columns or participant_id is None:
+        return df
+    wanted = str(muscle).strip().upper()
+    muscles = (
+        df[MUSCLE_COLUMN].astype("string").fillna("").str.strip().str.upper()
+    )
+    is_participant = pd.to_numeric(df["ID"], errors="coerce") == participant_id
+    return df[~is_participant | (muscles == wanted) | (muscles == "")]
+
+
 def _merge_group(group: pd.DataFrame, output_cols: list[str]) -> dict:
     """Combine one target's rows by taking the first non-null value per column."""
     out: dict = {}

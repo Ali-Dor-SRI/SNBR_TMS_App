@@ -18,6 +18,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from parser.handedness import (
+    HANDEDNESS_COLUMN,
+    HANDEDNESS_LINE_PREFIXES,
+    extract_handedness,
+)
 from parser.mem_parser import iter_files, normalize_dirs
 from parser.recording_target import (
     MUSCLE_COLUMN,
@@ -48,7 +53,8 @@ _CSP_VALUE_PATTERN = re.compile(r"^(CSPs|CSPe)-(\d+)\(ms\)\s*=\s*([-\d.]+)")
 def csp_output_columns() -> list[str]:
     """Return the stable output schema for parsed CSP records."""
     return (
-        ["Study", "ID", "Date", "Age", "Sex", "Subject_type", "Stimulated_cortex",
+        ["Study", "ID", "Date", "Age", "Sex", HANDEDNESS_COLUMN,
+         "Subject_type", "Stimulated_cortex",
          MUSCLE_COLUMN, SIDE_COLUMN]
         + list(CSP_VALUE_COLUMNS)
         + ["source_file"]
@@ -67,6 +73,7 @@ def initialize_csp_record() -> dict:
         "Date": None,
         "Age": None,
         "Sex": None,
+        HANDEDNESS_COLUMN: None,
         "Subject_type": None,
         "Stimulated_cortex": None,
         MUSCLE_COLUMN: None,
@@ -149,6 +156,13 @@ _HEADER_PARSERS: dict[str, tuple[str, Callable] | Callable] = {
 
 
 def _parse_header_field(stripped: str, record: dict) -> None:
+    # Matched on the whole line, not through the prefix table: the older export
+    # format ("Subject right-handed") carries no field name to key on.
+    if stripped.startswith(HANDEDNESS_LINE_PREFIXES):
+        hand = extract_handedness(stripped)
+        if hand is not None:
+            record[HANDEDNESS_COLUMN] = hand
+        return
     for prefix, entry in _HEADER_PARSERS.items():
         if stripped.startswith(prefix):
             if prefix == "Name:":
