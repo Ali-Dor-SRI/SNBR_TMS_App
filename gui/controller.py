@@ -1438,15 +1438,18 @@ class AppController:
 
         Sorted and de-duplicated, so ``["L", "R"]`` means there are two traces
         to overlay and a single-element list means there is nothing to split.
+
+        *date* of ``None`` spans every visit the participant has, which is what
+        a longitudinal figure needs: the hemispheres worth overlaying there are
+        the ones across their history, not the ones at one visit.
         """
         if df is None:
             df = self._dataframe
-        if df is None or "Stimulated_cortex" not in df.columns or date is None:
+        if df is None or "Stimulated_cortex" not in df.columns:
             return []
-        rows = df[
-            (pd.to_numeric(df["ID"], errors="coerce") == pid)
-            & (df["Date"] == date.strftime(self._DATE_FMT))
-        ]
+        rows = df[pd.to_numeric(df["ID"], errors="coerce") == pid]
+        if date is not None:
+            rows = rows[rows["Date"] == date.strftime(self._DATE_FMT)]
         values = (
             rows["Stimulated_cortex"].astype("string")
             .fillna("").str.strip().replace("", pd.NA).dropna().unique()
@@ -1459,14 +1462,18 @@ class AppController:
         Built from the rows rather than by parsing the labels back apart: the
         muscle is free text in the .MEM header, so an unrecognised value is
         kept verbatim and could not be split off a label reliably.
+
+        *date* of ``None`` maps every target the participant has, across all
+        their visits. A participant whose visits alternate sides has a different
+        target at each one, so a label resolved against a single visit comes back
+        unknown as soon as the selected date moves.
         """
         df = self._dataframe
-        if df is None or MUSCLE_COLUMN not in df.columns or date is None:
+        if df is None or MUSCLE_COLUMN not in df.columns:
             return {}
-        rows = df[
-            (pd.to_numeric(df["ID"], errors="coerce") == pid)
-            & (df["Date"] == date.strftime(self._DATE_FMT))
-        ]
+        rows = df[pd.to_numeric(df["ID"], errors="coerce") == pid]
+        if date is not None:
+            rows = rows[rows["Date"] == date.strftime(self._DATE_FMT)]
         mapping: dict = {}
         for _, row in rows.iterrows():
             muscle, side = target_key(row[MUSCLE_COLUMN], row.get(SIDE_COLUMN))
@@ -2390,9 +2397,36 @@ class AppController:
         # muscle/side. Applied after the cortex branches so it composes with
         # them; the reference cohort is left pooled either way.
         if len(targets) == 1:
-            kwargs["data_df"] = self._get_target_filtered_df(
-                targets[0], df=kwargs["data_df"],
+            # ...except on a graph that overlays hemispheres, which has to be
+            # given both of them. The target carries a side, and the page can
+            # only offer the targets of the *selected visit* -- so a participant
+            # whose visits alternate sides (SNBR-192: L->R in May, R->L in
+            # August) has exactly one target per visit, and filtering by it
+            # deletes the other visit. Every longitudinal figure then shows one
+            # visit, and the trajectory raises outright for having fewer than
+            # two. Narrow to the muscle instead and let the sides overlay, as
+            # the report path does.
+            muscle = (
+                # Resolved across every visit, not just the selected one: a
+                # participant whose visits alternate sides has a different
+                # target at each, so the selected visit alone cannot name them.
+                self._target_muscles(pid, None).get(targets[0])
+                if norm_type in self._GRAPH_TYPE_NEEDS_CORTEX_OVERLAY else None
             )
+            if muscle:
+                kwargs["data_df"] = self._get_muscle_filtered_df(
+                    muscle, df=kwargs["data_df"],
+                )
+                # Both sides are in the frame now, so ask for them to be drawn
+                # as separate traces. The plot pools them anyway when splitting
+                # would leave no trend (see should_pool_hemispheres) and says so
+                # on the figure.
+                if len(self._participant_cortices(pid, None, kwargs["data_df"])) > 1:
+                    kwargs["group_by_cortex"] = True
+            else:
+                kwargs["data_df"] = self._get_target_filtered_df(
+                    targets[0], df=kwargs["data_df"],
+                )
         elif len(targets) > 1 and group_muscle:
             # Both sides of one muscle: narrow to the muscle and let the two
             # hemispheres overlay on the same axes.

@@ -682,9 +682,16 @@ class VisualizationPanel(ctk.CTkFrame):
         self._figure_cache[key] = result
         self._expand_cached(_REGISTRY_BY_KEY[key])
 
-        item = self._nav_list[self._nav_index]
-        if item.figure is not None:
-            self._display_figure(item.figure)
+        # A graph that yields no figures leaves the index past the end of the
+        # list. Raising here would abort before the buttons are re-enabled and
+        # strand the page with everything disabled, so clamp instead.
+        if self._nav_list:
+            self._nav_index = min(self._nav_index, len(self._nav_list) - 1)
+            item = self._nav_list[self._nav_index]
+            if item.figure is not None:
+                self._display_figure(item.figure)
+        else:
+            self._display_placeholder()
         self._update_nav_buttons()
         self._update_nav_label()
 
@@ -724,8 +731,18 @@ class VisualizationPanel(ctk.CTkFrame):
                 self._nav_list.append(_NavItem(entry.key, 0, entry.label, None))
 
     def _append_cached_items(self, entry: GraphEntry):
-        """Append nav items from a cached result."""
+        """Append nav items from a cached result.
+
+        ``None`` is the sentinel ``_on_gen_error`` stores for a graph that could
+        not be built. Subscripting it here raised ``TypeError: 'NoneType' object
+        is not subscriptable`` out of ``_rebuild_nav_list`` -- which every
+        checkbox calls -- so one failed graph took the whole page's selection
+        and navigation down with it.
+        """
         result = self._figure_cache[entry.key]
+        if result is None:
+            return
+
         figs, _axes, data = result[0], result[1], result[2]
 
         if isinstance(figs, list):
@@ -749,7 +766,10 @@ class VisualizationPanel(ctk.CTkFrame):
         # Build new items
         new_items: list[_NavItem] = []
         result = self._figure_cache[entry.key]
-        figs, _axes, data = result[0], result[1], result[2]
+        if result is None:
+            figs = []          # the sentinel for a graph that failed to build
+        else:
+            figs, _axes, data = result[0], result[1], result[2]
 
         if isinstance(figs, list):
             labels = _sub_labels(entry, data, len(figs))
