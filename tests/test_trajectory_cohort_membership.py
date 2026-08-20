@@ -219,8 +219,10 @@ def test_visits_recorded_on_alternating_sides_are_not_deleted():
     assert data["visit_count"] == 2, (
         "the selected participant lost a visit to the hemisphere split"
     )
-    # Both hemispheres are drawn, one line each, rather than averaged together.
-    assert data["cohort_line_count"] >= 4
+    # Their two visits are drawn as one trajectory rather than two isolated
+    # points -- see test_mixed_hemisphere_note.py for why, and for the note that
+    # goes with it.
+    assert data["cohort_line_count"] >= 3
 
 
 def test_the_selected_participants_hemispheres_are_drawn_separately():

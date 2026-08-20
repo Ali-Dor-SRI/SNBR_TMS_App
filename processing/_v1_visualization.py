@@ -1805,17 +1805,20 @@ def plot_participant_tsici_over_time(
     )
 
     # Determine whether to split by cortex
-    _do_cortex_split = False
-    _cortex_vals = []
-    if group_by_cortex and "Stimulated_cortex" in participant_rows.columns:
-        _cortex_vals = sorted(
-            participant_rows["Stimulated_cortex"].astype("string")
-            .fillna("").str.strip().replace("", pd.NA).dropna().unique()
-        )
-        if len(_cortex_vals) > 1:
-            _do_cortex_split = True
+    _cortex_vals = participant_cortices(participant_rows)
+    # Split by hemisphere unless doing so would destroy a trend that pooling
+    # recovers -- see should_pool_hemispheres.
+    _do_cortex_split = (
+        bool(group_by_cortex)
+        and len(_cortex_vals) > 1
+        and not should_pool_hemispheres(participant_rows, _cortex_vals, value_column)
+    )
+    # Hemispheres drawn together without being separated: say so on the figure.
+    _pooled_across_hemispheres = len(_cortex_vals) > 1 and not _do_cortex_split
 
     figure, axis = plt.subplots(figsize=STANDARD_FIGSIZE)
+    if _pooled_across_hemispheres:
+        note_mixed_hemispheres(axis, _cortex_vals)
 
     all_y_values = []
     all_visit_dates = set()
@@ -2411,6 +2414,85 @@ def plot_participant_measure_over_time(
 _CI_Z_SCORES = {0.90: 1.6448536, 0.95: 1.9599640, 0.99: 2.5758293}
 
 
+def participant_cortices(rows: pd.DataFrame) -> list[str]:
+    """The distinct ``Stimulated_cortex`` values in *rows*, blanks dropped."""
+    if rows is None or rows.empty or "Stimulated_cortex" not in rows.columns:
+        return []
+    return sorted(
+        rows["Stimulated_cortex"].astype("string").fillna("")
+        .str.strip().replace("", pd.NA).dropna().unique()
+    )
+
+
+def _max_visits(rows: pd.DataFrame, columns) -> int:
+    """The most visits any one of *columns* yields for *rows*."""
+    best = 0
+    for column in columns:
+        if column not in rows.columns:
+            continue
+        try:
+            summary, _ = build_participant_visit_summary(rows, value_column=column)
+        except ValueError:
+            continue
+        best = max(best, len(summary))
+    return best
+
+
+def should_pool_hemispheres(
+    rows: pd.DataFrame, cortex_values, value_columns,
+) -> bool:
+    """Whether a longitudinal figure must draw both hemispheres as one series.
+
+    Splitting by hemisphere is the right default -- the two sides are not
+    interchangeable, and the split is what lets a both-sides visit be read left
+    against right. It goes wrong in exactly one case: a participant whose visits
+    *alternate* sides has a single point per hemisphere and therefore no line
+    anywhere, so the figure stops showing the change across visits that is its
+    whole purpose.
+
+    So pool only when splitting would destroy a trend that pooling recovers: no
+    hemisphere has two visits of its own, but together they do. A participant
+    recorded on both sides at a *single* visit keeps the split -- there is no
+    trend either way, and the left-versus-right comparison is the point.
+
+    When this returns True the figure gets :func:`note_mixed_hemispheres`.
+    """
+    if len(cortex_values) < 2:
+        return False
+
+    columns = [value_columns] if isinstance(value_columns, str) else list(value_columns)
+    cortex = rows["Stimulated_cortex"].astype("string").fillna("").str.strip()
+    per_side = max(
+        (_max_visits(rows[cortex == value], columns) for value in cortex_values),
+        default=0,
+    )
+    if per_side > 1:
+        return False  # a hemisphere has a series of its own; keep them apart
+    return _max_visits(rows, columns) > 1
+
+
+def note_mixed_hemispheres(axis, cortex_values):
+    """Mark a figure whose points do not all come from the same hemisphere.
+
+    T-SICI and the rest are not interchangeable between hemispheres, so a line
+    drawn through both is comparing measurements that are not strictly like for
+    like. The figure is still the right thing to show -- it is the only way to
+    see the change across those visits -- but the reader has to be told.
+    """
+    names = ", ".join(str(v) for v in cortex_values)
+    axis.text(
+        0.01, 0.99,
+        f"Note: visits span different hemispheres ({names});\n"
+        f"measurements are not all from the same side.",
+        transform=axis.transAxes, ha="left", va="top",
+        fontsize=8.5, color="#8A5A00", linespacing=1.3, zorder=9,
+        bbox=dict(
+            boxstyle="round,pad=0.35", facecolor="#FDF6E3",
+            edgecolor="#E0C97F", linewidth=0.8, alpha=0.95,
+        ),
+    )
+
+
 def _cortex_initials(df: pd.DataFrame) -> pd.Series:
     """``Stimulated_cortex`` reduced to ``"L"`` / ``"R"`` / ``""`` per row.
 
@@ -2590,9 +2672,20 @@ def plot_participant_measure_trajectory(
     # The selected participant's own hemispheres are drawn separately and
     # overlaid, so their series come from their own rows rather than from the
     # cohort pass (which drops a hemisphere holding only one visit).
+    selected_cortices = participant_cortices(participant_rows)
     selected_by_cortex = _hemisphere_series(
         participant_rows, resolved_value_column,
     ) or {"": selected_summary}
+
+    # ...unless splitting leaves no trajectory to draw. Visits that alternate
+    # sides give one point per hemisphere and no line at all, which hides the
+    # change across visits the figure exists to show. Pool them back into one
+    # series and say so on the figure instead.
+    pooled_across_hemispheres = should_pool_hemispheres(
+        participant_rows, selected_cortices, resolved_value_column,
+    )
+    if pooled_across_hemispheres:
+        selected_by_cortex = {"": selected_summary}
     cohort_series = {
         key: summ for key, summ in cohort_series.items()
         if int(key[0]) != int(resolved_id)
@@ -2711,6 +2804,9 @@ def plot_participant_measure_trajectory(
     axis.tick_params(axis="y", colors="#4C5B70", labelsize=11)
     axis.legend(frameon=False, loc="best", fontsize=9)
 
+    if pooled_across_hemispheres:
+        note_mixed_hemispheres(axis, selected_cortices)
+
     saved_png = ""
     if output_png is not None:
         output_path = Path(output_png)
@@ -2785,15 +2881,16 @@ def plot_participant_measure_visit_profiles(
     )
 
     # Determine cortex split
-    _do_cortex_split = False
-    _cortex_vals = []
-    if group_by_cortex and "Stimulated_cortex" in participant_rows.columns:
-        _cortex_vals = sorted(
-            participant_rows["Stimulated_cortex"].astype("string")
-            .fillna("").str.strip().replace("", pd.NA).dropna().unique()
-        )
-        if len(_cortex_vals) > 1:
-            _do_cortex_split = True
+    _cortex_vals = participant_cortices(participant_rows)
+    # Split by hemisphere unless doing so would destroy a trend that pooling
+    # recovers -- see should_pool_hemispheres.
+    _do_cortex_split = (
+        bool(group_by_cortex)
+        and len(_cortex_vals) > 1
+        and not should_pool_hemispheres(participant_rows, _cortex_vals, value_column)
+    )
+    # Hemispheres drawn together without being separated: say so on the figure.
+    _pooled_across_hemispheres = len(_cortex_vals) > 1 and not _do_cortex_split
 
     visit_profiles = build_participant_measure_visit_profiles(
         participant_rows,
@@ -2848,6 +2945,11 @@ def plot_participant_measure_visit_profiles(
         sharex=True,
         sharey=True,
     )
+    if _pooled_across_hemispheres:
+        note_mixed_hemispheres(
+            axes.flat[0] if hasattr(axes, 'flat') else axes,
+            _cortex_vals,
+        )
     axes = np.atleast_1d(axes).ravel()
 
     tick_positions, tick_labels, x_limits = waveform_tick_layout(
@@ -3293,15 +3395,16 @@ def plot_participant_csp_over_time(
     )
 
     # Determine cortex split
-    _do_cortex_split = False
-    _cortex_vals = []
-    if group_by_cortex and "Stimulated_cortex" in participant_rows.columns:
-        _cortex_vals = sorted(
-            participant_rows["Stimulated_cortex"].astype("string")
-            .fillna("").str.strip().replace("", pd.NA).dropna().unique()
-        )
-        if len(_cortex_vals) > 1:
-            _do_cortex_split = True
+    _cortex_vals = participant_cortices(participant_rows)
+    # Split by hemisphere unless doing so would destroy a trend that pooling
+    # recovers -- see should_pool_hemispheres.
+    _do_cortex_split = (
+        bool(group_by_cortex)
+        and len(_cortex_vals) > 1
+        and not should_pool_hemispheres(participant_rows, _cortex_vals, CSP_PROFILE_COLUMNS)
+    )
+    # Hemispheres drawn together without being separated: say so on the figure.
+    _pooled_across_hemispheres = len(_cortex_vals) > 1 and not _do_cortex_split
 
     base_title = title or default_csp_over_time_title(resolved_id)
     figures = []
@@ -3327,6 +3430,8 @@ def plot_participant_csp_over_time(
             continue
 
         figure, axis = plt.subplots(figsize=STANDARD_FIGSIZE)
+        if _pooled_across_hemispheres:
+            note_mixed_hemispheres(axis, _cortex_vals)
 
         if _do_cortex_split:
             all_y = []
@@ -3434,15 +3539,16 @@ def plot_participant_csp_visit_profiles(
     )
 
     # Determine cortex split
-    _do_cortex_split = False
-    _cortex_vals = []
-    if group_by_cortex and "Stimulated_cortex" in participant_rows.columns:
-        _cortex_vals = sorted(
-            participant_rows["Stimulated_cortex"].astype("string")
-            .fillna("").str.strip().replace("", pd.NA).dropna().unique()
-        )
-        if len(_cortex_vals) > 1:
-            _do_cortex_split = True
+    _cortex_vals = participant_cortices(participant_rows)
+    # Split by hemisphere unless doing so would destroy a trend that pooling
+    # recovers -- see should_pool_hemispheres.
+    _do_cortex_split = (
+        bool(group_by_cortex)
+        and len(_cortex_vals) > 1
+        and not should_pool_hemispheres(participant_rows, _cortex_vals, CSP_PROFILE_COLUMNS)
+    )
+    # Hemispheres drawn together without being separated: say so on the figure.
+    _pooled_across_hemispheres = len(_cortex_vals) > 1 and not _do_cortex_split
 
     visit_profiles = build_participant_csp_visit_profiles(
         participant_rows,
@@ -3504,6 +3610,8 @@ def plot_participant_csp_visit_profiles(
     for row_dict, long_df in valid_profile_rows:
         visit_label = str(row_dict["visit_label"])
         figure, axis = plt.subplots(figsize=STANDARD_FIGSIZE)
+        if _pooled_across_hemispheres:
+            note_mixed_hemispheres(axis, _cortex_vals)
 
         if _do_cortex_split:
             _drew_any = False
@@ -3788,15 +3896,16 @@ def plot_participant_rmt_over_time(
     )
 
     # Determine cortex split
-    _do_cortex_split = False
-    _cortex_vals = []
-    if group_by_cortex and "Stimulated_cortex" in participant_rows.columns:
-        _cortex_vals = sorted(
-            participant_rows["Stimulated_cortex"].astype("string")
-            .fillna("").str.strip().replace("", pd.NA).dropna().unique()
-        )
-        if len(_cortex_vals) > 1:
-            _do_cortex_split = True
+    _cortex_vals = participant_cortices(participant_rows)
+    # Split by hemisphere unless doing so would destroy a trend that pooling
+    # recovers -- see should_pool_hemispheres.
+    _do_cortex_split = (
+        bool(group_by_cortex)
+        and len(_cortex_vals) > 1
+        and not should_pool_hemispheres(participant_rows, _cortex_vals, RMT_COLUMNS)
+    )
+    # Hemispheres drawn together without being separated: say so on the figure.
+    _pooled_across_hemispheres = len(_cortex_vals) > 1 and not _do_cortex_split
 
     base_title = title or f"{format_participant_label(resolved_id)} | RMT thresholds over time"
     figures = []
@@ -3822,6 +3931,8 @@ def plot_participant_rmt_over_time(
             continue
 
         figure, axis = plt.subplots(figsize=STANDARD_FIGSIZE)
+        if _pooled_across_hemispheres:
+            note_mixed_hemispheres(axis, _cortex_vals)
 
         if _do_cortex_split:
             all_y = []
