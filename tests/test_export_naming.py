@@ -182,23 +182,105 @@ def test_study_is_resolved_by_visit_date_not_number_alone():
 # The Export page no longer refuses an empty box
 # --------------------------------------------------------------------------
 
-def test_export_page_does_not_reject_an_empty_path():
-    source = (Path(__file__).resolve().parents[1] / "gui" / "export_panel.py").read_text(
-        encoding="utf-8",
+@pytest.fixture(scope="module")
+def tk_root():
+    """One Tk root for the whole module, or a skip without a display.
+
+    Module-scoped deliberately. Creating and tearing down a Tk root once per
+    test intermittently fails to re-initialise Tcl ("Tcl wasn't installed
+    properly"), which turned one or two of these into random skips -- a test
+    that sometimes does not run is a test that sometimes does not protect.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    try:
+        import customtkinter as ctk
+        root = ctk.CTk()
+        root.withdraw()
+    except Exception as exc:  # pragma: no cover - headless CI
+        pytest.skip(f"no display available: {exc}")
+    yield root
+    root.destroy()
+
+
+@pytest.fixture
+def export_panel(tk_root, controller):
+    """A real ExportPanel wired to *controller*.
+
+    Driving the page is the point: these used to be assertions on the text of
+    export_panel.py -- 'no path is set' not in source, and a match on
+    'resolve_export_target(\\n                    "csv"' including its exact
+    indentation. That second one made reformatting the call, and nothing else,
+    turn the suite red.
+    """
+    from gui.export_panel import ExportPanel
+
+    panel = ExportPanel(
+        tk_root, controller, on_next=lambda: None, on_back=lambda: None,
     )
-    assert "no path is set" not in source
-    # The page now hands the folder and the file name over separately.
-    assert 'resolve_export_target(\n                    "csv"' in source
-    assert 'resolve_export_target(\n                    "pdf"' in source
+    yield panel
+    panel.destroy()
 
 
-def test_clearing_the_box_does_not_untick_the_export():
+def test_an_empty_box_exports_to_the_default_name(export_panel, controller, tmp_path):
+    """An empty box means "name it for me", and the export must actually land."""
+    controller.set_dataframe(controller.get_dataframe())
+
+    export_panel._csv_check.set(True)
+    export_panel._csv_dir.set(str(tmp_path))
+    export_panel._csv_name.set("")
+
+    # Called directly rather than through _handle_export's worker thread, so the
+    # assertion does not race the export.
+    export_panel._export_worker(
+        str(tmp_path), "", "", "", csv_wanted=True, pdf_wanted=False,
+    )
+
+    written = list(tmp_path.glob("*.csv"))
+    assert len(written) == 1, f"expected exactly one CSV, got {written}"
+    assert written[0].name == f"{default_dataframe_stem()}.csv"
+
+
+def test_the_page_does_not_refuse_an_empty_box(export_panel):
+    """It used to answer "no path is set" and do nothing."""
+    export_panel._csv_check.set(True)
+    export_panel._csv_dir.set("")
+    export_panel._csv_name.set("")
+    export_panel._pdf_check.set(False)
+
+    export_panel._handle_export()
+    export_panel.update()
+
+    status = export_panel._status_var.get().casefold()
+    assert "no path" not in status, f"the page refused an empty box: {status!r}"
+    assert "nothing selected" not in status
+
+
+def test_clearing_the_box_does_not_untick_the_export(export_panel):
     """The tick is the request now; an empty path only means "name it for me"."""
-    source = (Path(__file__).resolve().parents[1] / "gui" / "export_panel.py").read_text(
-        encoding="utf-8",
-    )
-    assert "self._csv_check.set(bool(" not in source
-    assert "self._pdf_check.set(bool(" not in source
+    for name_var, check_var in (
+        (export_panel._csv_name, export_panel._csv_check),
+        (export_panel._pdf_name, export_panel._pdf_check),
+    ):
+        name_var.set("something.csv")
+        assert check_var.get(), "typing a name should tick the export"
+
+        name_var.set("")
+        assert check_var.get(), (
+            "clearing the box unticked the export -- an empty box means "
+            "'name it for me', not 'skip this'"
+        )
+
+
+def test_typing_or_browsing_still_ticks_the_export(export_panel):
+    """The auto-tick is how a filled box announces itself."""
+    export_panel._csv_check.set(False)
+    export_panel._csv_dir.set(r"C:\somewhere")
+    assert export_panel._csv_check.get()
+
+    export_panel._pdf_check.set(False)
+    export_panel._pdf_name.set("report.pdf")
+    assert export_panel._pdf_check.get()
 
 
 # --------------------------------------------------------------------------
