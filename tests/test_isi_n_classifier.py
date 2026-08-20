@@ -317,12 +317,14 @@ def test_include_new_ids_toggle_on_adds_new_participant_rows(tmp_path):
     )
 
     ids = set(import_df["record_id"])
-    assert 1 in ids and 999 in ids
+    # The existing participant keeps REDCap's own integer key; the new one is
+    # zero-padded (see test_redcap_record_id_padding.py).
+    assert 1 in ids and "999" in ids
     assert stats["skipped_new_ids"] == []
     assert stats["new_ids_added"] == [999]
     # The new-participant row should have an empty event name for the user
     # to fill in before import.
-    new_row = import_df[import_df["record_id"] == 999].iloc[0]
+    new_row = import_df[import_df["record_id"] == "999"].iloc[0]
     assert new_row["redcap_event_name"] == ""
 
 

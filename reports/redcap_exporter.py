@@ -45,6 +45,10 @@ TOLERANCE = 0.01
 
 REQUIRED_KEY_COLS = ["record_id", "redcap_event_name"]
 
+# Width the lab uses for a participant number everywhere else — the .MEM
+# filenames, the report titles and the export names all read SNBR-001.
+RECORD_ID_WIDTH = 3
+
 TMS_VALUE_COLS = list(REDCAP_COLUMN_ORDER)
 
 # REDCap cortex encoding: 1 = Left, 2 = Right
@@ -124,6 +128,25 @@ def _is_valid_number(val) -> bool:
         return np.isfinite(v)
     except (ValueError, TypeError):
         return False
+
+
+def format_record_id(pid, *, is_new: bool):
+    """The ``record_id`` to write for one participant.
+
+    A **new** record — a participant REDCap has never seen, created by this
+    import — is zero-padded to :data:`RECORD_ID_WIDTH`, so the lab's numbering
+    reads ``001``/``010``/``100`` as it does in the ``.MEM`` filenames and on
+    the reports. Numbers already wider than that are left alone.
+
+    An **existing** record keeps the plain integer, deliberately. Its
+    ``record_id`` is REDCap's own primary key for a row that is already there;
+    rewriting ``7`` as ``007`` would no longer name the same record, so the
+    import would miss its target instead of updating it.
+    """
+    number = int(pid)
+    if not is_new:
+        return number
+    return f"{number:0{RECORD_ID_WIDTH}d}"
 
 
 def _validate_against_template(
@@ -520,11 +543,12 @@ def generate_redcap_import(
                 stats["cells_changed"] += 1
 
         if changed:
-            row = {"record_id": int(pid), "redcap_event_name": event_name}
+            record_id = format_record_id(pid, is_new=is_new_participant)
+            row = {"record_id": record_id, "redcap_event_name": event_name}
             row.update(changed)
             import_rows.append(row)
             old_value_rows.append({
-                "record_id": int(pid),
+                "record_id": record_id,
                 "redcap_event_name": event_name,
                 **old_vals,
             })
