@@ -2887,7 +2887,9 @@ def plot_participant_measure_visit_profiles(
     _do_cortex_split = (
         bool(group_by_cortex)
         and len(_cortex_vals) > 1
-        and not should_pool_hemispheres(participant_rows, _cortex_vals, value_column)
+        and not should_pool_hemispheres(
+            participant_rows, _cortex_vals, config["avg_column"],
+        )
     )
     # Hemispheres drawn together without being separated: say so on the figure.
     _pooled_across_hemispheres = len(_cortex_vals) > 1 and not _do_cortex_split
