@@ -26,7 +26,10 @@ from processing.cohort_filters import (
     restrict_cohort_to_analysis_cortex,
     restrict_cohort_to_study,
 )
-from processing.df_builder import restrict_participant_to_target
+from processing.df_builder import (
+    restrict_participant_to_muscle,
+    restrict_participant_to_target,
+)
 from reports.captions import (
     caption_for,
     csp_profile_caption,
@@ -1109,6 +1112,44 @@ def _study_cohort(df, pid, value_columns, visit_date=None):
     return cohort_df, patient_label, control_label, cohort_scope_label(study, applied)
 
 
+def _target_muscle_and_sides(df, pid, target: str | None):
+    """The muscle a recording-target label names, and how many sides it has.
+
+    Read out of the data rather than parsed out of the label, so an unrecognised
+    muscle kept verbatim by ``recording_target`` still resolves.
+
+    Returns ``(muscle, side_count)``; ``(None, 0)`` when the frame carries no
+    muscle data at all — an archive predating recording targets, where the
+    cortex selector still applies.
+    """
+    if not target or df is None or MUSCLE_COLUMN not in df.columns:
+        return None, 0
+
+    rows = df[pd.to_numeric(df["ID"], errors="coerce") == pid]
+    if rows.empty:
+        return None, 0
+
+    muscle = None
+    for _, row in rows.iterrows():
+        if target_label(row[MUSCLE_COLUMN], row.get(SIDE_COLUMN)) == target:
+            text = str(row[MUSCLE_COLUMN]).strip()
+            muscle = text or None
+            break
+    if muscle is None:
+        return None, 0
+
+    same_muscle = rows[
+        rows[MUSCLE_COLUMN].astype("string").fillna("").str.strip().str.upper()
+        == muscle.upper()
+    ]
+    sides = {
+        str(s).strip().upper()
+        for s in same_muscle.get(SIDE_COLUMN, pd.Series(dtype=object))
+        if str(s).strip()
+    }
+    return muscle, len(sides)
+
+
 def _group_plot_title(label, anchor_date, comparison):
     return f"{label} | Latest visit vs {comparison} | {anchor_date}"
 
@@ -1428,12 +1469,31 @@ def build_report_figures(
     # copy before narrowing.
     all_participant_rows = p_rows.copy()
     if recording_target:
-        resolved_df = restrict_participant_to_target(
-            resolved_df, resolved_id, recording_target,
+        # Narrow on the *raw* frame. load_mem_dataframe drops Muscle and
+        # Recorded_side (105 columns to 86), so a restriction applied to
+        # resolved_df finds no muscle column, returns the frame untouched and
+        # silently does nothing — while the figure titles still name a target.
+        #
+        # The narrowing is by muscle, not by the full target: a visit tested on
+        # both hemispheres records the same muscle on the left and the right,
+        # and those belong on one figure overlaid by stimulated cortex. Filtering
+        # the side as well deletes the other hemisphere's visits, which is how a
+        # participant whose visits alternate sides came to show only one of them.
+        muscle, side_count = _target_muscle_and_sides(
+            data_df, resolved_id, recording_target,
         )
-        p_rows, _, resolved_id = resolve_participant_context(
-            resolved_df, participant_id=participant_id,
-        )
+        if muscle:
+            resolved_df = load_mem_dataframe(
+                data_df=restrict_participant_to_muscle(
+                    data_df, resolved_id, muscle,
+                ),
+            )
+            p_rows, _, resolved_id = resolve_participant_context(
+                resolved_df, participant_id=participant_id,
+            )
+            # Both sides on one figure: name the muscle, not one of the sides.
+            if side_count > 1:
+                recording_target = muscle
 
     p_rows = p_rows.copy()
     p_rows["visit_date"] = pd.to_datetime(p_rows["Date"], dayfirst=True, errors="coerce")
@@ -1475,6 +1535,12 @@ def build_report_figures(
     # known because the exemption is keyed on (study, ID), and only a visit date
     # tells apart the same participant number in two different studies. The
     # matching per-study restriction is applied per measure in _study_cohort.
+    # Longitudinal figures keep every hemisphere. The restriction below stops a
+    # both-sides participant counting twice in a cross-sectional average, but a
+    # trajectory already collapses each visit date to one mean, so there is
+    # nothing to double-count — applying it there only deletes follow-up visits
+    # and drops anyone whose visits alternate sides below the two-visit minimum.
+    all_cortices_df = resolved_df
     resolved_df = restrict_cohort_to_analysis_cortex(
         resolved_df,
         exempt_id=resolved_id,
@@ -1582,7 +1648,7 @@ def build_report_figures(
         figures describing one cohort.
         """
         cohort_df, _, _, scope = _study_cohort(
-            resolved_df, resolved_id, _measure_value_columns(measure),
+            all_cortices_df, resolved_id, _measure_value_columns(measure),
             visit_date=anchor,
         )
         return {"data_df": cohort_df, "cohort_label_base": scope}
