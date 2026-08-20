@@ -2411,6 +2411,48 @@ def plot_participant_measure_over_time(
 _CI_Z_SCORES = {0.90: 1.6448536, 0.95: 1.9599640, 0.99: 2.5758293}
 
 
+def _cortex_initials(df: pd.DataFrame) -> pd.Series:
+    """``Stimulated_cortex`` reduced to ``"L"`` / ``"R"`` / ``""`` per row.
+
+    The column is free text (``"L"``, ``"Left M1"``, ``"LM"``), so only the
+    leading letter is trusted. Rows with no cortex come back ``""`` and are left
+    out of any per-hemisphere grouping rather than guessed at.
+    """
+    if "Stimulated_cortex" not in df.columns:
+        return pd.Series([""] * len(df), index=df.index, dtype=object)
+    text = (
+        df["Stimulated_cortex"].astype("string").fillna("")
+        .str.strip().str.upper().str[:1]
+    )
+    return text.where(text.isin(["L", "R"]), "").astype(object)
+
+
+def _hemisphere_series(
+    rows: pd.DataFrame, value_column: str,
+) -> dict[str, pd.DataFrame]:
+    """One visit series per hemisphere for a single participant.
+
+    Keyed ``"L"`` / ``"R"``; a series of one visit is kept, because for the
+    selected participant a single point still says the visit happened. Rows with
+    no cortex fall into ``""`` so a frame with no cortex data at all still
+    yields the pooled series it always did.
+    """
+    cortex = _cortex_initials(rows)
+    out: dict[str, pd.DataFrame] = {}
+    for value in sorted(set(cortex)):
+        subset = rows[cortex == value]
+        try:
+            summ, _ = build_participant_visit_summary(
+                subset, value_column=value_column,
+            )
+        except ValueError:
+            continue
+        summ = summ.reset_index(drop=True)
+        summ["visit_number"] = np.arange(1, len(summ) + 1)
+        out[value] = summ
+    return out
+
+
 def plot_participant_measure_trajectory(
     measure="t_sici",
     participant_id=None,
@@ -2477,16 +2519,35 @@ def plot_participant_measure_trajectory(
     selected_summary["visit_number"] = np.arange(1, len(selected_summary) + 1)
 
     # --- Cohort: participants of the same Subject_type with >= 2 visits ---
-    def _latest_non_missing(series) -> str | None:
-        vals = (
-            series.astype("string").fillna("").str.strip()
-            .replace("", pd.NA).dropna()
-        )
-        return str(vals.iloc[-1]) if not vals.empty else None
+    def _latest_non_missing(rows, column: str) -> str | None:
+        """The value from the participant's most recent *visit*.
 
-    subject_type = None
-    if "Subject_type" in participant_rows.columns:
-        subject_type = _latest_non_missing(participant_rows["Subject_type"])
+        Ordered by visit date rather than by row position. Taking the last row
+        instead reads whatever the frame happened to be sorted by: the cohort
+        frame handed to this function is not date-sorted, and SNBR-080's rows
+        arrive newest-first, so the last row is their *oldest* visit.
+
+        That matters because a participant's rows can disagree. SNBR-080 is
+        recorded Control at baseline and Patient at both follow-up visits, so
+        reading the last row drew their trajectory against the 4 SNBR controls
+        with repeated visits instead of the 39 patients. Which label is right is
+        a lab question; using the latest visit consistently is not.
+        """
+        if column not in rows.columns:
+            return None
+        vals = (
+            rows[column].astype("string").fillna("").str.strip()
+            .replace("", pd.NA)
+        )
+        usable = rows[vals.notna()]
+        if usable.empty:
+            return None
+        dates = pd.to_datetime(usable["Date"], dayfirst=True, errors="coerce")
+        if dates.notna().any():
+            usable = usable.loc[dates.sort_values(na_position="first").index]
+        return str(vals.loc[usable.index[-1]])
+
+    subject_type = _latest_non_missing(participant_rows, "Subject_type")
 
     cohort_df = resolved_df
     if subject_type is not None and "Subject_type" in resolved_df.columns:
@@ -2495,27 +2556,52 @@ def plot_participant_measure_trajectory(
 
     numeric_id = pd.to_numeric(cohort_df["ID"], errors="coerce")
     cohort_ids = numeric_id.dropna().astype(int).unique().tolist()
+    cohort_cortex = _cortex_initials(cohort_df)
 
-    cohort_series: dict[int, pd.DataFrame] = {}
+    # One line per participant *per hemisphere*. Pooling a participant's
+    # hemispheres would average a left-cortex visit together with a right-cortex
+    # one and draw the result as a single trajectory; splitting them keeps each
+    # series to one hemisphere, and a participant followed on both contributes
+    # two lines rather than one blended one.
+    #
+    # This is also why the cohort must NOT arrive hemisphere-restricted. Keeping
+    # one cortex per member is right for a cross-sectional comparison, where it
+    # stops a both-sides participant counting twice; here it silently deletes
+    # follow-up visits, and a participant whose visits alternate sides drops
+    # below the two-visit minimum and disappears altogether. It also buys
+    # nothing: build_participant_visit_summary already collapses a visit date to
+    # a single mean, so no participant can be counted twice in the first place.
+    cohort_series: dict[tuple[int, str], pd.DataFrame] = {}
     for cid in cohort_ids:
-        cid_rows = cohort_df[numeric_id == cid]
-        try:
-            summ, _ = build_participant_visit_summary(
-                cid_rows, value_column=resolved_value_column,
-            )
-        except ValueError:
-            continue
-        if len(summ) < 2:
-            continue  # only repeated-visit participants form the grey background
-        summ = summ.reset_index(drop=True)
-        summ["visit_number"] = np.arange(1, len(summ) + 1)
-        cohort_series[int(cid)] = summ
-    # Guarantee the selected participant is represented (they qualify by >= 2 visits).
-    cohort_series[int(resolved_id)] = selected_summary
+        for cortex in sorted(set(cohort_cortex[numeric_id == cid]) - {""}):
+            cid_rows = cohort_df[(numeric_id == cid) & (cohort_cortex == cortex)]
+            try:
+                summ, _ = build_participant_visit_summary(
+                    cid_rows, value_column=resolved_value_column,
+                )
+            except ValueError:
+                continue
+            if len(summ) < 2:
+                continue  # only repeated-visit series form the grey background
+            summ = summ.reset_index(drop=True)
+            summ["visit_number"] = np.arange(1, len(summ) + 1)
+            cohort_series[(int(cid), cortex)] = summ
+
+    # The selected participant's own hemispheres are drawn separately and
+    # overlaid, so their series come from their own rows rather than from the
+    # cohort pass (which drops a hemisphere holding only one visit).
+    selected_by_cortex = _hemisphere_series(
+        participant_rows, resolved_value_column,
+    ) or {"": selected_summary}
+    cohort_series = {
+        key: summ for key, summ in cohort_series.items()
+        if int(key[0]) != int(resolved_id)
+    }
 
     # --- Cohort mean +/- CI band per visit number ---
     by_visit: dict[int, list[float]] = {}
-    for summ in cohort_series.values():
+    band_sources = list(cohort_series.values()) + list(selected_by_cortex.values())
+    for summ in band_sources:
         for vnum, val in zip(summ["visit_number"], summ["visit_value"]):
             by_visit.setdefault(int(vnum), []).append(float(val))
 
@@ -2539,9 +2625,7 @@ def plot_participant_measure_trajectory(
     grey = "#AEB6BF"
     all_y: list[float] = []
     grey_labelled = False
-    for cid, summ in cohort_series.items():
-        if int(cid) == int(resolved_id):
-            continue  # the selected participant is drawn in red, not grey
+    for _key, summ in cohort_series.items():
         all_y.extend(summ["visit_value"].tolist())
         axis.plot(
             summ["visit_number"], summ["visit_value"],
@@ -2576,16 +2660,28 @@ def plot_participant_measure_trajectory(
 
     plabel = format_participant_label(resolved_id)
     red = "#C0392B"
-    axis.plot(
-        selected_summary["visit_number"], selected_summary["visit_value"],
-        color=red, linewidth=2.6, alpha=1.0, zorder=6, label=plabel,
-    )
-    axis.scatter(
-        selected_summary["visit_number"], selected_summary["visit_value"],
-        s=70, facecolors=red, edgecolors="#7B241C", linewidths=1.0,
-        alpha=1.0, zorder=7,
-    )
-    all_y.extend(selected_summary["visit_value"].tolist())
+    # A participant followed on both hemispheres gets one red line per side,
+    # overlaid and named, rather than the two averaged into a single trajectory.
+    # Dashed marks the right cortex so the pair stays legible in greyscale print.
+    _CORTEX_NAMES = {"L": "left cortex", "R": "right cortex"}
+    for cortex in sorted(selected_by_cortex):
+        summ = selected_by_cortex[cortex]
+        multiple = len(selected_by_cortex) > 1
+        label = (
+            f"{plabel} ({_CORTEX_NAMES.get(cortex, cortex)})"
+            if multiple and cortex else plabel
+        )
+        axis.plot(
+            summ["visit_number"], summ["visit_value"],
+            color=red, linewidth=2.6, alpha=1.0, zorder=6, label=label,
+            linestyle="--" if (multiple and cortex == "R") else "-",
+        )
+        axis.scatter(
+            summ["visit_number"], summ["visit_value"],
+            s=70, facecolors=red, edgecolors="#7B241C", linewidths=1.0,
+            alpha=1.0, zorder=7,
+        )
+        all_y.extend(summ["visit_value"].tolist())
 
     reference_line = reference_line_for_value_column(resolved_value_column)
     if reference_line is not None:
@@ -2630,8 +2726,16 @@ def plot_participant_measure_trajectory(
         "selected_rows": selected_rows.reset_index(drop=True),
         "visit_summary": selected_summary.reset_index(drop=True),
         "visit_count": int(len(selected_summary)),
-        "cohort_ids": sorted(int(c) for c in cohort_series),
-        "cohort_size": int(len(cohort_series)),
+        # A participant followed on both hemispheres contributes two lines, so
+        # the two counts differ: "cohort n=" in the caption means people, and
+        # counts the selected participant as it always has.
+        "cohort_ids": sorted(
+            {int(cid) for cid, _cortex in cohort_series} | {int(resolved_id)}
+        ),
+        "cohort_size": len(
+            {int(cid) for cid, _cortex in cohort_series} | {int(resolved_id)}
+        ),
+        "cohort_line_count": int(len(cohort_series)) + len(selected_by_cortex),
         "cohort_mean_by_visit": dict(zip(mean_x, mean_y)),
         "ci_level": float(ci_level),
         "saved_png": saved_png,

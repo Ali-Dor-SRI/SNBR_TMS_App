@@ -287,6 +287,49 @@ def participant_study(df: pd.DataFrame, participant_id, visit_date=None) -> str 
     return str(names.iloc[0])
 
 
+def subject_study_map(df: pd.DataFrame) -> dict:
+    """One study per participant number, taken from their first named row.
+
+    Mirrors how :func:`participant_study` resolves a single participant, applied
+    to the whole frame at once.
+    """
+    if df is None or df.empty or STUDY_COLUMN not in df.columns:
+        return {}
+    ids = _numeric_ids(df)
+    names = _text_series(df, STUDY_COLUMN)
+    resolved: dict = {}
+    for pid, name in zip(ids, names):
+        if pd.isna(pid) or not name:
+            continue
+        resolved.setdefault(int(pid), str(name))
+    return resolved
+
+
+def _subject_in_study_mask(df: pd.DataFrame, study: str) -> pd.Series:
+    """Every row of every participant whose *resolved* study is *study*.
+
+    Matching row by row instead truncates a participant's history: 40 of the
+    archive's participants carry more than one study token across their visits
+    (SNBR-013 has visits under SNBR, TMS and NIALS; SNBR-019 alternates
+    SNBR/NIALS) and a further 25% of rows name no study at all. Dropping the
+    rows that disagree leaves those participants with fewer visits than they
+    have — enough to push them under the two-visit minimum and out of every
+    longitudinal figure, without any of their data being missing.
+
+    A participant belongs to a study; a row does not.
+    """
+    wanted = str(study).strip().upper()
+    resolved = {
+        pid: name.strip().upper() for pid, name in subject_study_map(df).items()
+    }
+    ids = _numeric_ids(df)
+    return ids.map(
+        lambda pid: (
+            False if pd.isna(pid) else resolved.get(int(pid)) == wanted
+        )
+    ).astype(bool)
+
+
 def _has_usable_rows(
     df: pd.DataFrame, subject_type: str, value_columns=None,
 ) -> bool:
@@ -327,8 +370,7 @@ def restrict_cohort_to_study(
     if df is None or df.empty or not study or STUDY_COLUMN not in df.columns:
         return df, False
 
-    names = _text_series(df, STUDY_COLUMN).str.upper()
-    in_study = names == str(study).strip().upper()
+    in_study = _subject_in_study_mask(df, study)
 
     # The participant's own rows cannot vouch for their cohort, so they are held
     # out of the usability test even though they survive the filter.
