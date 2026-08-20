@@ -595,6 +595,45 @@ def _is_within(key: str, folder_keys: list[str]) -> bool:
     return False
 
 
+# A CSP export carries "CSPs-80(ms)=" / "CSPe-80(ms)=" lines in its EXTRA
+# VARIABLES block; a TMS export never does. Measured on the lab archive: 60/60
+# files in the CSP folder match and 0/60 TMS files do. The filename is
+# deliberately NOT used — 5 of 200 CSP files carry no "CSP" token, and 19 TMS
+# files do.
+_CSP_RECORDING_LINE = re.compile(r"^(CSPs|CSPe)-\d+\(ms\)\s*=", flags=re.IGNORECASE)
+
+
+def is_csp_recording(filepath: str | Path) -> bool:
+    """True when a ``.MEM`` file is a cortical-silent-period recording.
+
+    Used to keep CSP recordings out of the MEM parse when the CSP folder and
+    the MEM folder are the same one, which the folder-based exclusion cannot
+    express.  An unreadable file is reported as *not* CSP, so it still reaches
+    the MEM parser and fails there rather than disappearing silently.
+    """
+    from parser._common import read_source_lines
+
+    try:
+        for line in read_source_lines(filepath):
+            if _CSP_RECORDING_LINE.match(line.strip()):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def folder_contains(outer: str | Path, inner: str | Path) -> bool:
+    """True when *inner* is *outer* itself, or sits somewhere inside it.
+
+    Both sides go through :func:`_folder_key`, so a mapped drive and the UNC
+    path behind it compare equal — ``Y:\\Merged Data`` does contain
+    ``\\\\server\\share\\Merged Data\\MEM Data``.  Callers use this to notice
+    that an "exclude this folder" request would swallow the folder being
+    scanned.
+    """
+    return _is_within(_folder_key(inner), [_folder_key(outer)])
+
+
 def _same_file(first: str | Path, second: str | Path) -> bool:
     """True when two different paths are provably the same file on disk."""
     try:
@@ -791,6 +830,7 @@ def parse_mem_directory(
     input_dir: str | Path | list[str | Path] | None,
     exclude_dirs: list[str | Path | None] | None = None,
     recursive: bool = True,
+    files: list[Path] | None = None,
 ) -> list[dict]:
     """Parse all .MEM files under *input_dir* and return record dicts.
 
@@ -799,12 +839,19 @@ def parse_mem_directory(
     ``False`` only files directly inside each root are parsed.  Each dict
     has a ``source_file`` key set to the filename (stem + extension).
     Pass *exclude_dirs* to skip subtrees such as the CSP directory.
+
+    Pass *files* to parse exactly that list instead of scanning — the caller
+    has already decided which files belong to this parser.  *input_dir* is
+    still required, because it is what the "nothing found" error names.
     """
     roots = normalize_dirs(input_dir)
     if not roots:
         raise FileNotFoundError("No MEM directory was provided")
 
-    mem_files = iter_mem_files(roots, exclude_dirs, recursive=recursive)
+    mem_files = (
+        list(files) if files is not None
+        else iter_mem_files(roots, exclude_dirs, recursive=recursive)
+    )
     if not mem_files:
         shown = ", ".join(str(r) for r in roots)
         raise FileNotFoundError(f"No .MEM files found in: {shown}")

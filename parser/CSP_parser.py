@@ -185,6 +185,7 @@ def parse_csp_file(filepath: str | Path) -> dict:
 def parse_csp_directory(
     input_dir: str | Path | list[str | Path] | None,
     recursive: bool = True,
+    files: list[Path] | None = None,
 ) -> list[dict]:
     """Parse every CSP .MEM file in *input_dir* and return a list of record dicts.
 
@@ -192,12 +193,19 @@ def parse_csp_directory(
     dict has a ``source_file`` key set to the filename.  When *recursive*
     is ``True`` (default) subfolders are searched too; when ``False`` only
     files directly inside each root are parsed.
+
+    Pass *files* to parse exactly that list instead of scanning — used when the
+    CSP and MEM selections are one folder and the caller has already sorted the
+    CSP recordings out of it.
     """
     roots = normalize_dirs(input_dir)
     if not roots:
         raise FileNotFoundError("No CSP directory was provided")
 
-    mem_files = iter_files(roots, "*.MEM", recursive=recursive)
+    mem_files = (
+        list(files) if files is not None
+        else iter_files(roots, "*.MEM", recursive=recursive)
+    )
     if not mem_files:
         shown = ", ".join(str(r) for r in roots)
         raise FileNotFoundError(f"No CSP .MEM files found in: {shown}")

@@ -38,6 +38,8 @@ from parser.mem_parser import (
     CSP_RMT_LEVELS,
     TSICI_ISIS,
     TSICF_ISIS,
+    folder_contains,
+    is_csp_recording,
     iter_files,
     iter_mem_files,
     normalize_dirs,
@@ -896,6 +898,78 @@ def _backfill_new_parser_columns(
 # High-level build functions
 # ---------------------------------------------------------------------------
 
+def mem_scan_exclusions(mem_dir, *folders) -> list[Path]:
+    """The CSP/CMAP folders that can safely be kept out of the MEM scan.
+
+    The exclusion exists for the common lab layout where the CSP folder is a
+    *subfolder* of the MEM folder: those files are a different format and must
+    not be fed to the MEM parser.
+
+    A folder that IS a MEM root, or contains one, is dropped from the list
+    instead. Excluding it would exclude the MEM files themselves and the scan
+    would report that the MEM folder holds no ``.MEM`` files at all — which is
+    what happened when the same folder was chosen for both, a layout the lab
+    does use when CSP recordings are saved alongside the TMS ones.
+
+    Feeding those CSP files to the MEM parser is harmless: it reads only the
+    shared header (participant, date, muscle, side, cortex) and finds none of
+    the TMS measurement blocks, so the row it produces carries demographics
+    that ``_coalesce_same_session_rows`` merges into the visit's real row, and
+    ``merge_csp_into_mem`` fills the CSP values in as it always did.
+    """
+    mem_roots = normalize_dirs(mem_dir)
+    keep: list[Path] = []
+    for folder in folders:
+        for candidate in normalize_dirs(folder):
+            if any(folder_contains(candidate, root) for root in mem_roots):
+                continue
+            keep.append(candidate)
+    return keep
+
+
+def split_shared_mem_csp_folder(mem_files: list[Path]) -> tuple[list[Path], list[Path]]:
+    """Split one folder's ``.MEM`` files into (TMS recordings, CSP recordings).
+
+    Only needed when the CSP and MEM selections are the same folder, where the
+    folder-based exclusion cannot separate them. Classification is by content
+    (:func:`parser.mem_parser.is_csp_recording`), never by filename.
+
+    This matters for more than tidiness: a CSP export often records its own
+    ``RMT200`` for the visit, and the CSP file sorts before the TMS file of the
+    same session, so letting CSP files reach the MEM parser would make the
+    CSP recording's RMT win the first-non-null coalesce and silently replace
+    the TMS recording's value.
+    """
+    csp_files = [f for f in mem_files if is_csp_recording(f)]
+    csp_set = {str(f) for f in csp_files}
+    tms_files = [f for f in mem_files if str(f) not in csp_set]
+    return tms_files, csp_files
+
+
+def _mem_csp_file_split(
+    mem_dir, csp_dir, cmap_dir, mem_recursive, mem_files: list[Path] | None = None,
+):
+    """Return ``(tms_files, csp_files)`` when MEM and CSP share a folder, else ``(None, None)``.
+
+    ``(None, None)`` means the ordinary folder-based split applies and nothing
+    about the existing behaviour changes.
+    """
+    mem_roots = normalize_dirs(mem_dir)
+    csp_roots = normalize_dirs(csp_dir)
+    overlaps = any(
+        folder_contains(c, root) for c in csp_roots for root in mem_roots
+    )
+    if not overlaps:
+        return None, None
+    if mem_files is None:
+        mem_files = iter_mem_files(
+            mem_roots,
+            exclude_dirs=mem_scan_exclusions(mem_roots, csp_dir, cmap_dir),
+            recursive=mem_recursive,
+        )
+    return split_shared_mem_csp_folder(mem_files)
+
+
 def build_combined_dataframe(
     mem_dir: str | Path | list[str | Path],
     csp_dir: str | Path | list[str | Path] | None = None,
@@ -919,12 +993,25 @@ def build_combined_dataframe(
         When ``True`` (default) subfolders are searched too.  Set ``False``
         to scan only files directly inside the selected folders.
     """
+    # When the CSP selection is the same folder as the MEM one, the files are
+    # separated by content instead of by folder (see _mem_csp_file_split).
+    tms_files, csp_files = _mem_csp_file_split(
+        mem_dir, csp_dir, cmap_dir, mem_recursive,
+    )
+
     mem_records = parse_mem_directory(
-        mem_dir, exclude_dirs=[csp_dir, cmap_dir], recursive=mem_recursive,
+        mem_dir,
+        exclude_dirs=mem_scan_exclusions(mem_dir, csp_dir, cmap_dir),
+        recursive=mem_recursive,
+        files=tms_files,
     )
     mem_df = build_mem_dataframe(mem_records)
 
-    if iter_files(csp_dir, "*.MEM", recursive=csp_recursive):
+    if csp_files is not None:
+        if csp_files:
+            csp_records = parse_csp_directory(csp_dir, files=csp_files)
+            mem_df = merge_csp_into_mem(mem_df, build_csp_dataframe(csp_records))
+    elif iter_files(csp_dir, "*.MEM", recursive=csp_recursive):
         csp_records = parse_csp_directory(csp_dir, recursive=csp_recursive)
         csp_df = build_csp_dataframe(csp_records)
         mem_df = merge_csp_into_mem(mem_df, csp_df)
@@ -985,8 +1072,18 @@ def build_combined_dataframe_incremental(
         raise FileNotFoundError(f"MEM folder does not exist: {shown}")
 
     mem_files = iter_mem_files(
-        mem_roots, exclude_dirs=[csp_dir, cmap_dir], recursive=mem_recursive,
+        mem_roots,
+        exclude_dirs=mem_scan_exclusions(mem_roots, csp_dir, cmap_dir),
+        recursive=mem_recursive,
     )
+    # When the CSP selection is the same folder as the MEM one, that one scan
+    # holds both kinds of file; separate them by content (see
+    # _mem_csp_file_split) so CSP recordings never reach the MEM parser.
+    shared_tms, shared_csp = _mem_csp_file_split(
+        mem_roots, csp_dir, cmap_dir, mem_recursive, mem_files=mem_files,
+    )
+    if shared_tms is not None:
+        mem_files = shared_tms
     if not mem_files:
         shown = ", ".join(str(r) for r in mem_roots)
         raise FileNotFoundError(f"No .MEM files found in: {shown}")
@@ -997,7 +1094,10 @@ def build_combined_dataframe_incremental(
     # aren't mistakenly flagged as orphans below (their source_file is a CSP
     # filename, not a MEM one).
     csp_filenames = {
-        f.name for f in iter_files(csp_dir, "*.MEM", recursive=csp_recursive)
+        f.name for f in (
+            shared_csp if shared_csp is not None
+            else iter_files(csp_dir, "*.MEM", recursive=csp_recursive)
+        )
     }
 
     # ---- Load existing CSV (if any) ----
@@ -1093,8 +1193,16 @@ def build_combined_dataframe_incremental(
         combined = kept_df
 
     # ---- Re-merge CSP data ----
-    if iter_files(csp_dir, "*.MEM", recursive=csp_recursive):
-        csp_records = parse_csp_directory(csp_dir, recursive=csp_recursive)
+    csp_to_parse = (
+        shared_csp if shared_csp is not None
+        else iter_files(csp_dir, "*.MEM", recursive=csp_recursive)
+    )
+    if csp_to_parse:
+        csp_records = parse_csp_directory(
+            csp_dir,
+            recursive=csp_recursive,
+            files=shared_csp if shared_csp is not None else None,
+        )
         csp_df = build_csp_dataframe(csp_records)
         combined = merge_csp_into_mem(combined, csp_df)
 
