@@ -83,16 +83,18 @@ def _trajectory(df, pid=SUBJECT, **kwargs):
 def test_subject_type_is_read_from_the_most_recent_visit():
     """A participant whose rows disagree must be typed by their latest visit.
 
-    The frame is put newest-first for the subject, which is how the cohort frame
-    actually arrives -- SNBR-080's rows come back 18/08/2026, 18/08/2026,
-    22/04/2024. Taking the last row therefore reads their *oldest* visit. Note
-    build_mem_dataframe sorts by date, so the order has to be re-imposed here or
-    the test cannot see the bug at all.
+    The dates matter. resolve_participant_context sorts the participant's rows
+    by the date *string*, so "18/08/2026" sorts before "22/04/2024" -- 18 < 22 --
+    and the newest visit ends up first with the oldest last. That is exactly how
+    SNBR-080's rows arrive, and it is what makes reading the last row read their
+    oldest visit. Pick a baseline whose day-of-month is higher than the
+    follow-up's, or the string order coincides with date order and the bug
+    cannot be seen at all.
     """
     records = [
         # The subject: Patient at the 2026 follow-up, Control at 2024 baseline.
         _rec(SUBJECT, "01/03/2026", 70.0),
-        _rec(SUBJECT, "01/01/2024", 72.0, subject_type="Control"),
+        _rec(SUBJECT, "22/01/2024", 72.0, subject_type="Control"),
     ]
     # Two repeated-visit patients, one repeated-visit control.
     for pid in (10, 11):
@@ -103,11 +105,14 @@ def test_subject_type_is_read_from_the_most_recent_visit():
     ]
 
     df = build_mem_dataframe(records)
-    order = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
-    df = df.loc[order.sort_values(ascending=False).index].reset_index(drop=True)
-    subject_rows = df[pd.to_numeric(df["ID"], errors="coerce") == SUBJECT]
-    assert str(subject_rows["Subject_type"].iloc[-1]) == "Control", (
-        "guard: the last row must be the oldest visit or this test is vacuous"
+
+    # Guard: reproduce the ordering the real cohort frame has, or this test
+    # passes for the wrong reason.
+    from processing._v1_visualization import resolve_participant_context
+    seen, _, _ = resolve_participant_context(df, participant_id=SUBJECT)
+    assert str(seen["Subject_type"].iloc[-1]) == "Control", (
+        f"the last row must be the oldest visit or this test is vacuous; "
+        f"got {list(seen['Date'])}"
     )
 
     data = _trajectory(df)
