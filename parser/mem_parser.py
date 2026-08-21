@@ -33,6 +33,7 @@ from parser.handedness import HANDEDNESS_COLUMN
 from parser.recording_target import (
     MUSCLE_COLUMN,
     SIDE_COLUMN,
+    extract_comment_target,
     extract_sr_sites_target,
 )
 from parser.sr_parser import SR_CURVE_COLUMN, SR_MAX_COLUMN, extract_sr_block
@@ -220,6 +221,21 @@ def _parse_sr_sites(stripped: str, record: dict) -> None:
         record[MUSCLE_COLUMN] = muscle
     if side is not None and record[SIDE_COLUMN] is None:
         record[SIDE_COLUMN] = side
+
+
+def _has_sr_sd_data(record: dict) -> bool:
+    """Whether *record* carries a stimulus-response or strength-duration block.
+
+    This is what marks a parsed file as an SR-SD (peripheral) recording — the
+    only kind whose ``Comments:`` line may name the recorded side.
+    """
+    return any(
+        record.get(column) is not None
+        for column in (
+            SR_MAX_COLUMN, SR_CURVE_COLUMN,
+            SD_RHEOBASE_COLUMN, SD_TAU_COLUMN, SD_POINTS_COLUMN,
+        )
+    )
 
 
 def _parse_header_field(stripped: str, record: dict) -> None:
@@ -463,6 +479,7 @@ def parse_mem_file(filepath: str | Path) -> dict:
 
     record = initialize_record()
     current_section = "header"
+    comments_line: str | None = None
 
     for line in lines:
         stripped = line.strip()
@@ -480,6 +497,8 @@ def parse_mem_file(filepath: str | Path) -> dict:
             continue
 
         if current_section == "header":
+            if comments_line is None and stripped.startswith("Comments:"):
+                comments_line = stripped
             _parse_header_field(stripped, record)
         elif current_section == "extra_vars":
             _parse_extra_vars_line(stripped, record)
@@ -522,6 +541,19 @@ def parse_mem_file(filepath: str | Path) -> dict:
     record[SD_POINTS_COLUMN] = (
         json.dumps(sd_block["points"]) if sd_block["points"] else None
     )
+
+    # The SR-SD exports usually leave the side out of "S/R sites:"
+    # ("Wrist-FDI"), and when the operator recorded it anywhere it is in the
+    # free-text "Comments:" line ("LEFT FDI").  On every other kind of file
+    # the comment is protocol or clinical shorthand, so it is read only when
+    # the file actually carries an SR or SD block, and only to fill in what
+    # "S/R sites:" left blank.
+    if comments_line is not None and _has_sr_sd_data(record):
+        comment_muscle, comment_side = extract_comment_target(comments_line)
+        if comment_muscle is not None and record[MUSCLE_COLUMN] is None:
+            record[MUSCLE_COLUMN] = comment_muscle
+        if comment_side is not None and record[SIDE_COLUMN] is None:
+            record[SIDE_COLUMN] = comment_side
 
     # Fallback Study from filename
     if record["Study"] is None and filename_study is not None:

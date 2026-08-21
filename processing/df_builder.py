@@ -59,8 +59,12 @@ from parser.recording_target import (
     target_key,
     target_label,
 )
-from parser.sr_parser import SR_MAX_COLUMN
-from parser.strength_duration_parser import SD_RHEOBASE_COLUMN, SD_TAU_COLUMN
+from parser.sr_parser import SR_CURVE_COLUMN, SR_MAX_COLUMN
+from parser.strength_duration_parser import (
+    SD_POINTS_COLUMN,
+    SD_RHEOBASE_COLUMN,
+    SD_TAU_COLUMN,
+)
 from parser.cmap_parser import (
     cmap_output_columns,
     parse_cmap_directory,
@@ -477,6 +481,52 @@ def _apply_cmap_merge(
 # Same-session row coalescing
 # ---------------------------------------------------------------------------
 
+# Columns that hold an SR-SD (peripheral) recording's own data.  A row
+# carrying any of them IS a distinct recording: merging two such rows keeps
+# the first row's curve and silently discards the other's.
+PERIPHERAL_PAYLOAD_COLUMNS = (
+    SR_CURVE_COLUMN, SR_MAX_COLUMN,
+    SD_POINTS_COLUMN, SD_RHEOBASE_COLUMN, SD_TAU_COLUMN,
+)
+
+
+def row_has_sr_sd_payload(row) -> bool:
+    """Whether a DataFrame row carries its own SR-SD (peripheral) recording.
+
+    Judged on the payload columns rather than on file names so it works for
+    freshly parsed records and archive rows alike (an archive predating
+    ``SR_curve`` still has ``SR_max_cmap_1ms``).
+    """
+    for column in PERIPHERAL_PAYLOAD_COLUMNS:
+        value = row.get(column)
+        if value is None:
+            continue
+        if not isinstance(value, str) and pd.isna(value):
+            continue
+        text = str(value).strip()
+        if text and text.lower() not in ("nan", "none", "<na>") and text != "[]":
+            return True
+    return False
+
+
+def _sr_sd_recording_identity(row, fallback) -> str:
+    """Which SR-SD *acquisition* a payload row came from.
+
+    Two .MEM exports of one Qtrac acquisition — SNBR-197's M-scan export and
+    its excitability export of the same ``TP3C60527B.QZD`` — share the
+    filename token and are one recording, so they must keep merging.  Files
+    with different tokens (SNBR-213's ``TP3C60821A`` and ``TP2C60821A``) are
+    different recordings.  When no token can be read, *fallback* keeps the row
+    distinct rather than merging two recordings that cannot be told apart.
+    """
+    names = _split_source_files(row.get("source_file"))
+    if names:
+        token = _acquisition_token(names[0])
+        if token:
+            return token
+    return f"<unidentified:{fallback}>"
+
+
 def resolve_visit_targets(group: pd.DataFrame) -> dict:
     """Map each row index of a one-visit *group* to its recording-target key.
 
@@ -487,9 +537,15 @@ def resolve_visit_targets(group: pd.DataFrame) -> dict:
 
     * **Side absorption** — a file with a muscle but no side joins that
       muscle's single known side for the visit.  It only keeps an empty side
-      (becoming its own "side unspecified" target) when the visit genuinely
-      recorded that muscle on two or more sides, so the file cannot be
-      attributed.
+      (becoming its own "side unspecified" target) when the side genuinely
+      cannot be attributed.  An SR-SD (peripheral) file is stricter on both
+      ends: it absorbs only a side established by the visit's TMS files —
+      another SR-SD file's side must not leak onto it, because two peripheral
+      acquisitions are two recordings (SNBR-213's left and right FDI), not
+      two views of one — and only when it is the muscle's single side-less
+      SR-SD acquisition, since with two of them the side belongs to neither
+      in particular.  (Two exports of one acquisition — SNBR-197's M-scan and
+      excitability files of the same .QZD — count once and still merge.)
     * **Single-target collapse** — when the visit resolves to at most one
       identified target, *every* row collapses onto it, including rows with no
       muscle header at all (peripheral nerve-excitability files).  This is the
@@ -497,19 +553,31 @@ def resolve_visit_targets(group: pd.DataFrame) -> dict:
       one-row-per-visit behaviour exactly.  Only when two or more targets are
       identified do muscle-less rows stay on their own visit-level row, where
       the cortex/target-independent graph types still find them.
+      (:func:`_coalesce_same_session_rows` additionally refuses to merge two
+      SR-SD payload rows that collapse onto one side-less target.)
     """
     resolved: dict = {}
     sides_by_muscle: dict[str, set[str]] = defaultdict(set)
+    tms_sides_by_muscle: dict[str, set[str]] = defaultdict(set)
+    sideless_recordings_by_muscle: dict[str, set[str]] = defaultdict(set)
 
     raw: dict = {}
+    payload: dict = {}
     for idx in group.index:
         muscle, side = target_key(
             group.at[idx, MUSCLE_COLUMN] if MUSCLE_COLUMN in group.columns else None,
             group.at[idx, SIDE_COLUMN] if SIDE_COLUMN in group.columns else None,
         )
         raw[idx] = (muscle, side)
+        payload[idx] = row_has_sr_sd_payload(group.loc[idx])
         if muscle and side:
             sides_by_muscle[muscle].add(side)
+            if not payload[idx]:
+                tms_sides_by_muscle[muscle].add(side)
+        elif muscle and payload[idx]:
+            sideless_recordings_by_muscle[muscle].add(
+                _sr_sd_recording_identity(group.loc[idx], idx)
+            )
 
     for idx, (muscle, side) in raw.items():
         if not muscle:
@@ -517,8 +585,15 @@ def resolve_visit_targets(group: pd.DataFrame) -> dict:
         elif side:
             resolved[idx] = (muscle, side)
         else:
-            known = sides_by_muscle.get(muscle, set())
-            resolved[idx] = (muscle, known.pop()) if len(known) == 1 else (muscle, "")
+            pool = tms_sides_by_muscle if payload[idx] else sides_by_muscle
+            known = pool.get(muscle, set())
+            absorbable = len(known) == 1 and (
+                not payload[idx]
+                or len(sideless_recordings_by_muscle[muscle]) == 1
+            )
+            resolved[idx] = (
+                (muscle, next(iter(known))) if absorbable else (muscle, "")
+            )
 
     identified = {t for t in resolved.values() if t[0]}
     if len(identified) <= 1:
@@ -726,18 +801,43 @@ def _coalesce_same_session_rows(df: pd.DataFrame) -> pd.DataFrame:
         targets = resolve_visit_targets(visit)
         for target in dict.fromkeys(targets.values()):  # preserve first-seen order
             indices = [i for i, t in targets.items() if t == target]
-            group = visit.loc[indices]
-            out = (
-                {c: group.iloc[0][c] for c in output_cols}
-                if len(group) == 1
-                else _merge_group(group, output_cols)
-            )
             muscle, side = target
-            if MUSCLE_COLUMN in output_cols:
-                out[MUSCLE_COLUMN] = muscle or np.nan
-            if SIDE_COLUMN in output_cols:
-                out[SIDE_COLUMN] = side or np.nan
-            combined_rows.append(out)
+            # Rows from *different* SR-SD acquisitions must not merge while
+            # their side is unresolved: first-non-null would keep one
+            # recording's curve and silently discard the other's (SNBR-213's
+            # left and right FDI, distinguishable only by their Comments
+            # lines).  Each acquisition keeps its own row; two exports of one
+            # acquisition (SNBR-197's M-scan + excitability files) share a
+            # token and still merge; and any non-payload rows of the same
+            # target merge together, on their own, since they cannot be
+            # attributed to either recording.
+            recording_groups: dict[str, list] = {}
+            if not side and len(indices) > 1:
+                for i in indices:
+                    if row_has_sr_sd_payload(visit.loc[i]):
+                        identity = _sr_sd_recording_identity(visit.loc[i], i)
+                        recording_groups.setdefault(identity, []).append(i)
+            if len(recording_groups) >= 2:
+                grouped = [i for sub in recording_groups.values() for i in sub]
+                remainder = [i for i in indices if i not in grouped]
+                subgroups = list(recording_groups.values())
+                if remainder:
+                    subgroups.append(remainder)
+                subgroups.sort(key=lambda sub: indices.index(sub[0]))
+            else:
+                subgroups = [indices]
+            for sub in subgroups:
+                group = visit.loc[sub]
+                out = (
+                    {c: group.iloc[0][c] for c in output_cols}
+                    if len(group) == 1
+                    else _merge_group(group, output_cols)
+                )
+                if MUSCLE_COLUMN in output_cols:
+                    out[MUSCLE_COLUMN] = muscle or np.nan
+                if SIDE_COLUMN in output_cols:
+                    out[SIDE_COLUMN] = side or np.nan
+                combined_rows.append(out)
 
     combined = pd.DataFrame(combined_rows, columns=output_cols)
     if unkeyed.empty:

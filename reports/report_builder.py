@@ -18,7 +18,12 @@ from __future__ import annotations
 
 import pandas as pd
 
-from parser.recording_target import MUSCLE_COLUMN, SIDE_COLUMN, target_label
+from parser.recording_target import (
+    MUSCLE_COLUMN,
+    SIDE_COLUMN,
+    target_key,
+    target_label,
+)
 from processing.cohort_filters import (
     cohort_label_bases,
     cohort_scope_label,
@@ -29,6 +34,7 @@ from processing.cohort_filters import (
 from processing.df_builder import (
     restrict_participant_to_muscle,
     restrict_participant_to_target,
+    row_has_sr_sd_payload,
 )
 from reports.captions import (
     caption_for,
@@ -709,12 +715,81 @@ def _build_munix_table_figure(
     return fig
 
 
+def unattributed_recording_note(muscle) -> str:
+    """The caveat for an SR-SD figure whose recording cannot be attributed.
+
+    Drawn when a visit holds several SR-SD recordings and this one's side (or
+    muscle) is named nowhere — not in ``S/R sites:``, not in ``Comments:``,
+    and not attributable to a single same-muscle TMS recording. The plots are
+    still shown (the data is real); the reader has to be told that which limb
+    they came from is not certain.
+    """
+    muscle_text = "" if muscle is None else str(muscle).strip()
+    if muscle_text and muscle_text.lower() not in ("nan", "none", "<na>"):
+        what = "side"
+    else:
+        what = "muscle and side"
+    return (
+        f"Note: this visit has several SR-SD recordings; the {what}\n"
+        f"this one was recorded from could not be determined."
+    )
+
+
+def recording_label_and_note(
+    muscle, side, index: int, total: int, base_label: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Subtitle label + caveat for one of a visit's SR-SD recordings.
+
+    A visit with a single recording keeps *base_label* untouched and no note,
+    so the overwhelmingly common case renders exactly as before.  With several
+    recordings, one whose side is known is labelled by it (``Left FDI``); one
+    whose side is unknown is numbered (``FDI — recording 1 of 2``) and carries
+    the :func:`unattributed_recording_note` caveat.
+    """
+    if total <= 1:
+        return base_label, None
+    muscle_key, side_key = target_key(muscle, side)
+    if side_key:
+        return target_label(muscle_key, side_key), None
+    base = muscle_key or base_label or "SR-SD"
+    return (
+        f"{base} — recording {index + 1} of {total}",
+        unattributed_recording_note(muscle_key or None),
+    )
+
+
+# Corner presets for _draw_recording_note, chosen per figure so the note never
+# sits on that figure's own legend or fitted curve.
+_NOTE_CORNERS = {
+    "upper left": {"x": 0.02, "y": 0.97, "ha": "left", "va": "top"},
+    "lower left": {"x": 0.02, "y": 0.03, "ha": "left", "va": "bottom"},
+    "lower right": {"x": 0.98, "y": 0.03, "ha": "right", "va": "bottom"},
+}
+
+
+def _draw_recording_note(ax, note_text: str | None, corner: str = "upper left"):
+    """Draw the amber caveat box on *ax* (same style as the hemisphere note)."""
+    if not note_text:
+        return
+    pos = _NOTE_CORNERS[corner]
+    ax.text(
+        pos["x"], pos["y"], note_text,
+        transform=ax.transAxes, ha=pos["ha"], va=pos["va"],
+        fontsize=8.5, color="#8A5A00", linespacing=1.3, zorder=9,
+        bbox=dict(
+            boxstyle="round,pad=0.35", facecolor="#FDF6E3",
+            edgecolor="#E0C97F", linewidth=0.8, alpha=0.95,
+        ),
+    )
+
+
 def _build_sr_figure(
     participant_label: str,
     sr_points: list[dict],
     max_cmap_1ms: float | None,
     visit_date: str | None,
     target_label: str | None = None,
+    note_text: str | None = None,
 ):
     """Render the stimulus-response recruitment scatter for one participant visit.
 
@@ -771,6 +846,8 @@ def _build_sr_figure(
         transform=ax.transAxes, ha="center", va="bottom",
         fontsize=11, fontweight="bold", color="#2B6CB0",
     )
+    # The recruitment curve climbs to the upper right; upper left stays clear.
+    _draw_recording_note(ax, note_text, "upper left")
 
     fig.subplots_adjust(top=0.85, bottom=0.11, left=0.10, right=0.96)
     return fig
@@ -809,6 +886,7 @@ def _build_strength_duration_curve_figure(
     tau_sd_ms: float | None,
     visit_date: str | None,
     target_label: str | None = None,
+    note_text: str | None = None,
 ):
     """Render the strength-duration curve for one participant visit.
 
@@ -896,6 +974,9 @@ def _build_strength_duration_curve_figure(
         transform=ax.transAxes, ha="center", va="bottom",
         fontsize=11, fontweight="bold", color="#2B6CB0",
     )
+    # The hyperbola falls from the upper left and the legend sits upper
+    # right; lower left, under the curve's tail, stays clear.
+    _draw_recording_note(ax, note_text, "lower left")
 
     fig.subplots_adjust(top=0.85, bottom=0.11, left=0.10, right=0.96)
     return fig
@@ -909,6 +990,7 @@ def _build_charge_duration_figure(
     r_squared: float | None,
     visit_date: str | None,
     target_label: str | None = None,
+    note_text: str | None = None,
 ):
     """Render the charge-duration (Weiss linearization) plot for one visit.
 
@@ -983,6 +1065,9 @@ def _build_charge_duration_figure(
         transform=ax.transAxes, ha="center", va="bottom",
         fontsize=11, fontweight="bold", color="#2B6CB0",
     )
+    # The Weiss line climbs to the upper right, the legend sits upper left and
+    # the x-intercept annotation lower left; lower right stays clear.
+    _draw_recording_note(ax, note_text, "lower right")
 
     fig.subplots_adjust(top=0.85, bottom=0.11, left=0.10, right=0.96)
     return fig
@@ -1372,44 +1457,111 @@ def _load_sd_for_visit(
     return [], rheobase, tau
 
 
+def _sd_recordings_for_visit(
+    participant_rows: pd.DataFrame,
+    visit_date: str | None,
+    mem_dir=None,
+) -> list[dict]:
+    """One entry per SR-SD recording of the visit with charge-duration data.
+
+    Since recording-target splitting, a visit may hold several peripheral
+    rows — a left and a right FDI recording, or two recordings whose side is
+    unknown — and each carries its own points and scalars, so pairing them per
+    row is what keeps a figure's fit drawn from the same recording as its
+    scatter.  Each entry is ``{"points", "rheobase", "tau", "muscle",
+    "side"}``.  Rows predating the payload columns fall back to the historical
+    whole-visit load, which reproduces the single-recording behaviour exactly.
+    """
+    rows = participant_rows
+    if visit_date is not None and "Date" in rows.columns:
+        # Tolerant of formatting: the anchor date comes from the normalised
+        # frame while these rows are the raw one.
+        want = pd.to_datetime(visit_date, dayfirst=True, errors="coerce")
+        if pd.notna(want):
+            have = pd.to_datetime(rows["Date"], dayfirst=True, errors="coerce")
+            rows = rows[have == want]
+        else:
+            rows = rows[
+                rows["Date"].astype("string").fillna("").str.strip() == visit_date
+            ]
+    if rows.empty:
+        return []
+
+    recordings: list[dict] = []
+    for _, row in rows.iterrows():
+        if not row_has_sr_sd_payload(row):
+            continue
+        points, rheobase, tau = _load_sd_for_visit(row.to_frame().T, None, mem_dir)
+        if not points or rheobase is None or tau is None:
+            continue
+        recordings.append({
+            "points": points, "rheobase": rheobase, "tau": tau,
+            "muscle": row.get(MUSCLE_COLUMN), "side": row.get(SIDE_COLUMN),
+        })
+    if recordings:
+        return recordings
+
+    # Archive rows predating the payload columns: whole-visit fallback.
+    points, rheobase, tau = _load_sd_for_visit(rows, None, mem_dir)
+    if points and rheobase is not None and tau is not None:
+        return [{
+            "points": points, "rheobase": rheobase, "tau": tau,
+            "muscle": None, "side": None,
+        }]
+    return []
+
+
 def _strength_duration_curve_section(
     plabel, p_rows, anchor, mem_dir, target_label_text=None,
 ) -> list:
-    """Build the strength-duration curve ReportItem for the CLI report path."""
-    points, rheobase, tau = _load_sd_for_visit(p_rows, anchor, mem_dir)
-    if not points or rheobase is None or tau is None:
-        return []
-    fig = _build_strength_duration_curve_figure(
-        plabel, points, rheobase, tau, anchor, target_label_text,
-    )
-    caption = caption_for("strength_duration_curve", None, {
-        "rheobase_mA": rheobase, "tau_sd_ms": tau, "sd_point_count": len(points),
-    })
-    return [ReportItem(
-        figure=fig, caption=caption, section_key="strength_duration_curve",
-    )]
+    """Build the strength-duration curve ReportItem(s) for the CLI report path."""
+    recordings = _sd_recordings_for_visit(p_rows, anchor, mem_dir)
+    items: list = []
+    total = len(recordings)
+    for index, rec in enumerate(recordings):
+        label, note = recording_label_and_note(
+            rec["muscle"], rec["side"], index, total, target_label_text,
+        )
+        fig = _build_strength_duration_curve_figure(
+            plabel, rec["points"], rec["rheobase"], rec["tau"], anchor,
+            label, note,
+        )
+        caption = caption_for("strength_duration_curve", None, {
+            "rheobase_mA": rec["rheobase"], "tau_sd_ms": rec["tau"],
+            "sd_point_count": len(rec["points"]),
+        })
+        items.append(ReportItem(
+            figure=fig, caption=caption, section_key="strength_duration_curve",
+        ))
+    return items
 
 
 def _charge_duration_weiss_section(
     plabel, p_rows, anchor, mem_dir, target_label_text=None,
 ) -> list:
-    """Build the charge-duration (Weiss) ReportItem for the CLI report path."""
+    """Build the charge-duration (Weiss) ReportItem(s) for the CLI report path."""
     from parser.strength_duration_parser import charge_duration_r_squared
 
-    points, rheobase, tau = _load_sd_for_visit(p_rows, anchor, mem_dir)
-    if not points or rheobase is None or tau is None:
-        return []
-    r2 = charge_duration_r_squared(points, rheobase, tau)
-    fig = _build_charge_duration_figure(
-        plabel, points, rheobase, tau, r2, anchor, target_label_text,
-    )
-    caption = caption_for("charge_duration_weiss", None, {
-        "rheobase_mA": rheobase, "tau_sd_ms": tau, "r_squared": r2,
-        "sd_point_count": len(points),
-    })
-    return [ReportItem(
-        figure=fig, caption=caption, section_key="charge_duration_weiss",
-    )]
+    recordings = _sd_recordings_for_visit(p_rows, anchor, mem_dir)
+    items: list = []
+    total = len(recordings)
+    for index, rec in enumerate(recordings):
+        label, note = recording_label_and_note(
+            rec["muscle"], rec["side"], index, total, target_label_text,
+        )
+        r2 = charge_duration_r_squared(rec["points"], rec["rheobase"], rec["tau"])
+        fig = _build_charge_duration_figure(
+            plabel, rec["points"], rec["rheobase"], rec["tau"], r2, anchor,
+            label, note,
+        )
+        caption = caption_for("charge_duration_weiss", None, {
+            "rheobase_mA": rec["rheobase"], "tau_sd_ms": rec["tau"],
+            "r_squared": r2, "sd_point_count": len(rec["points"]),
+        })
+        items.append(ReportItem(
+            figure=fig, caption=caption, section_key="charge_duration_weiss",
+        ))
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -1468,6 +1620,7 @@ def build_report_figures(
     # when the plots below are restricted to one of them, so keep an unfiltered
     # copy before narrowing.
     all_participant_rows = p_rows.copy()
+    target_muscle = None
     if recording_target:
         # Narrow on the *raw* frame. load_mem_dataframe drops Muscle and
         # Recorded_side (105 columns to 86), so a restriction applied to
@@ -1483,6 +1636,7 @@ def build_report_figures(
             data_df, resolved_id, recording_target,
         )
         if muscle:
+            target_muscle = muscle
             resolved_df = load_mem_dataframe(
                 data_df=restrict_participant_to_muscle(
                     data_df, resolved_id, muscle,
@@ -1494,6 +1648,21 @@ def build_report_figures(
             # Both sides on one figure: name the muscle, not one of the sides.
             if side_count > 1:
                 recording_target = muscle
+
+    # The SR-SD sections read the *raw* frame too: load_mem_dataframe drops
+    # the payload columns (SD_points, Rheobase_mA, ...) along with
+    # Muscle/Recorded_side, so the normalised rows cannot tell one recording
+    # from another — a visit holding a left and a right recording would fall
+    # back to the source-file re-read and render only the first file's curve.
+    raw_sd_rows = data_df
+    if "ID" in raw_sd_rows.columns:
+        raw_sd_rows = raw_sd_rows[
+            pd.to_numeric(raw_sd_rows["ID"], errors="coerce") == resolved_id
+        ]
+    if target_muscle:
+        raw_sd_rows = restrict_participant_to_muscle(
+            raw_sd_rows, resolved_id, target_muscle,
+        )
 
     p_rows = p_rows.copy()
     p_rows["visit_date"] = pd.to_datetime(p_rows["Date"], dayfirst=True, errors="coerce")
@@ -1701,10 +1870,10 @@ def build_report_figures(
             else []
         ),
         "strength_duration_curve": lambda: _strength_duration_curve_section(
-            plabel, p_rows, anchor, mem_dir, recording_target,
+            plabel, raw_sd_rows, anchor, mem_dir, recording_target,
         ),
         "charge_duration_weiss": lambda: _charge_duration_weiss_section(
-            plabel, p_rows, anchor, mem_dir, recording_target,
+            plabel, raw_sd_rows, anchor, mem_dir, recording_target,
         ),
         "rmt_over_time": lambda: _single_fig_or_msg(
             "rmt_over_time",

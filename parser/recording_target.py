@@ -34,11 +34,22 @@ deliberately conservative:
     Parsing this is what lets a visit's peripheral recording sit on the same
     row as the cortical recording of the same muscle and side.
 
+``Comments:``
+    The recent SR-SD exports name only the muscle in ``S/R sites:``
+    (``Wrist-FDI``), and when the operator recorded the side anywhere it is
+    here (``LEFT FDI``).  On every other kind of file the comment is protocol
+    or clinical shorthand (``TSICI ASICI CSP``, ``Pt didnt tolrt <3ms``), so
+    only two unmistakable spellings count: a spelled-out ``LEFT``/``RIGHT``
+    word, or ``L``/``R`` joined directly to a known muscle token (``L FDI``,
+    ``L-FDI``).  Callers apply it to SR-SD files only, and only to fill in
+    what ``S/R sites:`` left blank.
+
 Public API
 ----------
 extract_muscle(stripped)            -> str | None
 extract_recorded_side(stripped)     -> str | None
 extract_sr_sites_target(stripped)   -> tuple[str | None, str | None]
+extract_comment_target(stripped)    -> tuple[str | None, str | None]
 target_key(muscle, side)            -> tuple[str, str]
 target_label(muscle, side)          -> str
 """
@@ -79,6 +90,18 @@ _SR_SITES_MUSCLE_PATTERN = re.compile(
 # A leading "L"/"R" word only — "Wrist-FDI" must not read as a right-side
 # recording, and "A:rL->R.APB.PA" must not read as anything at all.
 _SR_SITES_SIDE_PATTERN = re.compile(r"^\s*([LR])\b", re.IGNORECASE)
+
+_COMMENT_PATTERN = re.compile(r"Comments:\s*(.*)$")
+# A side + muscle pair joined by space or hyphen ("LEFT FDI", "L-FDI"). A bare
+# L/R is accepted only in this joined form: "SR-SD" and "Only use 2nd trial RC"
+# both contain the letter R and must read as nothing.
+_COMMENT_SIDE_MUSCLE_PATTERN = re.compile(
+    r"\b(L|R|LEFT|RIGHT)[-\s]+(" + "|".join(_KNOWN_MUSCLES) + r")\b",
+    re.IGNORECASE,
+)
+# A spelled-out side word on its own ("LEFT") — unambiguous even without a
+# muscle next to it.
+_COMMENT_SIDE_WORD_PATTERN = re.compile(r"\b(LEFT|RIGHT)\b", re.IGNORECASE)
 
 
 def extract_muscle(stripped: str) -> str | None:
@@ -122,6 +145,31 @@ def extract_sr_sites_target(stripped: str) -> tuple[str | None, str | None]:
     side_match = _SR_SITES_SIDE_PATTERN.search(text)
     side = side_match.group(1).upper() if side_match else None
     return muscle, side
+
+
+def extract_comment_target(stripped: str) -> tuple[str | None, str | None]:
+    """Extract ``(muscle, side)`` from a ``Comments:`` header line.
+
+    Deliberately strict — the comment is free text used for protocol and
+    clinical notes on most files, so only the two unmistakable spellings
+    count (see the module docstring).  The muscle is never taken without a
+    side next to it: ``S/R sites:`` names the muscle already, and a lone
+    muscle token inside a protocol note would be a guess.
+    """
+    match = _COMMENT_PATTERN.search(stripped)
+    if not match:
+        return None, None
+    text = match.group(1).strip()
+    if not text:
+        return None, None
+
+    pair = _COMMENT_SIDE_MUSCLE_PATTERN.search(text)
+    if pair:
+        return pair.group(2).upper(), pair.group(1).upper()[0]
+    side_word = _COMMENT_SIDE_WORD_PATTERN.search(text)
+    if side_word:
+        return None, side_word.group(1).upper()[0]
+    return None, None
 
 
 def _clean(value) -> str:

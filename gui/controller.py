@@ -1693,14 +1693,53 @@ class AppController:
                 )
         return [], max_cmap
 
-    def _build_sr_figure_for_selected(self, pid: int, date) -> tuple:
-        """Build a stimulus-response scatter for the selected participant/visit.
+    def _sr_recordings_for_rows(self, rows: pd.DataFrame) -> list[dict]:
+        """One entry per SR recording among *rows*.
 
-        Returns a ``(Figure, None, dict)`` tuple so it slots into the same
-        plumbing as ``plot_mem_graph`` results. The plot covers this
-        participant only; the reference Max CMAP at 1 ms is annotated on top.
+        Since recording-target splitting, a visit may hold several SR-SD rows
+        (a left and a right FDI recording, or two recordings whose side is
+        unknown); each row's curve is paired with its own reference amplitude.
+        Rows predating the payload columns fall back to the historical
+        whole-visit load, which reproduces the single-recording behaviour.
         """
-        from reports.report_builder import _build_sr_figure
+        from processing.df_builder import row_has_sr_sd_payload
+
+        recordings: list[dict] = []
+        for _, row in rows.iterrows():
+            if not row_has_sr_sd_payload(row):
+                continue
+            curve, max_cmap = self._load_sr_curve_for_rows(row.to_frame().T)
+            if not curve:
+                continue
+            recordings.append({
+                "curve": curve, "max_cmap": max_cmap,
+                "muscle": row.get(MUSCLE_COLUMN), "side": row.get(SIDE_COLUMN),
+            })
+        if recordings:
+            return recordings
+
+        curve, max_cmap = self._load_sr_curve_for_rows(rows)
+        if curve:
+            return [{
+                "curve": curve, "max_cmap": max_cmap,
+                "muscle": None, "side": None,
+            }]
+        return []
+
+    def _build_sr_figure_for_selected(self, pid: int, date) -> tuple:
+        """Build the stimulus-response scatter(s) for the selected visit.
+
+        Returns a ``(Figure, None, dict)`` tuple — or
+        ``(list[Figure], list, dict)`` when the visit holds several SR
+        recordings — so it slots into the same plumbing as ``plot_mem_graph``
+        results. Each plot covers this participant only, with its own
+        reference Max CMAP at 1 ms annotated on top; a recording that cannot
+        be attributed to a side carries the amber caveat.
+        """
+        from reports.report_builder import (
+            _build_sr_figure,
+            recording_label_and_note,
+        )
         from processing.visualizer import format_participant_label
 
         df = self._target_scoped_dataframe()
@@ -1713,22 +1752,39 @@ class AppController:
         if rows.empty:
             raise ValueError("No stimulus-response data for this visit.")
 
-        curve, max_cmap = self._load_sr_curve_for_rows(rows)
-        if not curve:
+        recordings = self._sr_recordings_for_rows(rows)
+        if not recordings:
             raise ValueError("No stimulus-response data for this visit.")
 
-        # Prefer the DataFrame's stored reference amplitude; it is the value
-        # persisted to CSV and matches what other views report.
-        if SR_MAX_COLUMN in rows.columns:
-            stored = pd.to_numeric(rows[SR_MAX_COLUMN], errors="coerce").dropna()
-            if not stored.empty:
-                max_cmap = float(stored.iloc[0])
-
         plabel = format_participant_label(pid)
-        fig = _build_sr_figure(
-            plabel, curve, max_cmap, date_str, self._target_suffix() or None,
-        )
-        return fig, None, {"sr_max_cmap_1ms": max_cmap, "sr_point_count": len(curve)}
+        total = len(recordings)
+        base_label = self._target_suffix() or None
+        figures: list = []
+        keys: list = []
+        per_key: dict = {}
+        for index, rec in enumerate(recordings):
+            label, note = recording_label_and_note(
+                rec["muscle"], rec["side"], index, total, base_label,
+            )
+            figures.append(_build_sr_figure(
+                plabel, rec["curve"], rec["max_cmap"], date_str, label, note,
+            ))
+            key = f"recording_{index + 1}"
+            keys.append(key)
+            per_key[key] = {
+                "sr_max_cmap_1ms": rec["max_cmap"],
+                "sr_point_count": len(rec["curve"]),
+            }
+
+        data = {
+            "sr_max_cmap_1ms": recordings[0]["max_cmap"],
+            "sr_point_count": len(recordings[0]["curve"]),
+        }
+        if total == 1:
+            return figures[0], None, data
+        data["figure_keys"] = keys
+        data["recordings"] = per_key
+        return figures, [None] * total, data
 
     # ── Strength-duration figures ─────────────────────────
 
@@ -1772,13 +1828,62 @@ class AppController:
                 )
         return [], None, None
 
+    def _stored_sd_scalars(self, rows: pd.DataFrame, rheobase, tau):
+        """Prefer the DataFrame's stored SD scalars over re-parsed values.
+
+        They are the values persisted to CSV and match what other views report.
+        """
+        if SD_RHEOBASE_COLUMN in rows.columns:
+            stored = pd.to_numeric(rows[SD_RHEOBASE_COLUMN], errors="coerce").dropna()
+            if not stored.empty:
+                rheobase = float(stored.iloc[0])
+        if SD_TAU_COLUMN in rows.columns:
+            stored = pd.to_numeric(rows[SD_TAU_COLUMN], errors="coerce").dropna()
+            if not stored.empty:
+                tau = float(stored.iloc[0])
+        return rheobase, tau
+
+    def _sd_recordings_for_rows(self, rows: pd.DataFrame) -> list[dict]:
+        """One entry per SR-SD recording among *rows* with charge-duration data.
+
+        The per-row counterpart of :meth:`_sr_recordings_for_rows`: each
+        recording's points are paired with that row's own scalars, so a
+        figure's fit is drawn from the same recording as its scatter.
+        """
+        from processing.df_builder import row_has_sr_sd_payload
+
+        recordings: list[dict] = []
+        for _, row in rows.iterrows():
+            if not row_has_sr_sd_payload(row):
+                continue
+            one = row.to_frame().T
+            points, rheobase, tau = self._load_sd_points_for_rows(one)
+            if not points:
+                continue
+            rheobase, tau = self._stored_sd_scalars(one, rheobase, tau)
+            recordings.append({
+                "points": points, "rheobase": rheobase, "tau": tau,
+                "muscle": row.get(MUSCLE_COLUMN), "side": row.get(SIDE_COLUMN),
+            })
+        if recordings:
+            return recordings
+
+        points, rheobase, tau = self._load_sd_points_for_rows(rows)
+        if points:
+            rheobase, tau = self._stored_sd_scalars(rows, rheobase, tau)
+            return [{
+                "points": points, "rheobase": rheobase, "tau": tau,
+                "muscle": None, "side": None,
+            }]
+        return []
+
     def _sd_context_for_selected(self, pid: int, date):
         """Shared setup for the two strength-duration figures.
 
-        Returns ``(participant_label, date_str, points, rheobase, tau)`` and
-        raises ``ValueError`` when the visit has no charge-duration data. The
-        derived scalars prefer the DataFrame's stored values (what CSV holds),
-        falling back to the values re-parsed from the source file.
+        Returns ``(participant_label, date_str, recordings)`` — one dict per
+        SR-SD recording of the visit, each pairing its own points with its own
+        stored scalars — and raises ``ValueError`` when the visit has no
+        charge-duration data.
         """
         from processing.visualizer import format_participant_label
 
@@ -1792,63 +1897,106 @@ class AppController:
         if rows.empty:
             raise ValueError("No strength-duration data for this visit.")
 
-        points, rheobase, tau = self._load_sd_points_for_rows(rows)
-        if not points:
+        recordings = self._sd_recordings_for_rows(rows)
+        if not recordings:
             raise ValueError("No strength-duration data for this visit.")
 
-        # Prefer the DataFrame's stored scalars; they are the values persisted
-        # to CSV and match what other views report.
-        if SD_RHEOBASE_COLUMN in rows.columns:
-            stored = pd.to_numeric(rows[SD_RHEOBASE_COLUMN], errors="coerce").dropna()
-            if not stored.empty:
-                rheobase = float(stored.iloc[0])
-        if SD_TAU_COLUMN in rows.columns:
-            stored = pd.to_numeric(rows[SD_TAU_COLUMN], errors="coerce").dropna()
-            if not stored.empty:
-                tau = float(stored.iloc[0])
-
-        return format_participant_label(pid), date_str, points, rheobase, tau
+        return format_participant_label(pid), date_str, recordings
 
     def _build_strength_duration_curve_for_selected(self, pid: int, date) -> tuple:
-        """Build the strength-duration curve for the selected participant/visit.
+        """Build the strength-duration curve(s) for the selected visit.
 
-        Returns a ``(Figure, None, dict)`` tuple so it slots into the same
-        plumbing as ``plot_mem_graph`` results. Participant-only; the fitted
-        hyperbola uses the QtracP-derived rheobase and tau.
+        Returns a ``(Figure, None, dict)`` tuple — or a list-of-figures tuple
+        when the visit holds several SR-SD recordings — so it slots into the
+        same plumbing as ``plot_mem_graph`` results. Participant-only; each
+        fitted hyperbola uses that recording's own QtracP-derived rheobase
+        and tau.
         """
-        from reports.report_builder import _build_strength_duration_curve_figure
-
-        plabel, date_str, points, rheobase, tau = self._sd_context_for_selected(pid, date)
-        fig = _build_strength_duration_curve_figure(
-            plabel, points, rheobase, tau, date_str, self._target_suffix() or None,
+        from reports.report_builder import (
+            _build_strength_duration_curve_figure,
+            recording_label_and_note,
         )
-        return fig, None, {
-            "rheobase_mA": rheobase,
-            "tau_sd_ms": tau,
-            "sd_point_count": len(points),
+
+        plabel, date_str, recordings = self._sd_context_for_selected(pid, date)
+        total = len(recordings)
+        base_label = self._target_suffix() or None
+        figures: list = []
+        keys: list = []
+        per_key: dict = {}
+        for index, rec in enumerate(recordings):
+            label, note = recording_label_and_note(
+                rec["muscle"], rec["side"], index, total, base_label,
+            )
+            figures.append(_build_strength_duration_curve_figure(
+                plabel, rec["points"], rec["rheobase"], rec["tau"], date_str,
+                label, note,
+            ))
+            key = f"recording_{index + 1}"
+            keys.append(key)
+            per_key[key] = {
+                "rheobase_mA": rec["rheobase"],
+                "tau_sd_ms": rec["tau"],
+                "sd_point_count": len(rec["points"]),
+            }
+
+        data = {
+            "rheobase_mA": recordings[0]["rheobase"],
+            "tau_sd_ms": recordings[0]["tau"],
+            "sd_point_count": len(recordings[0]["points"]),
         }
+        if total == 1:
+            return figures[0], None, data
+        data["figure_keys"] = keys
+        data["recordings"] = per_key
+        return figures, [None] * total, data
 
     def _build_charge_duration_weiss_for_selected(self, pid: int, date) -> tuple:
-        """Build the charge-duration (Weiss) plot for the selected participant/visit.
+        """Build the charge-duration (Weiss) plot(s) for the selected visit.
 
-        Returns a ``(Figure, None, dict)`` tuple. The straight line uses the
-        derived rheobase (slope) and tau (x-intercept = -tau); the fit R^2 is of
-        the measured charge points about that line.
+        Returns a ``(Figure, None, dict)`` tuple — or a list-of-figures tuple
+        when the visit holds several SR-SD recordings. Each straight line uses
+        that recording's own rheobase (slope) and tau (x-intercept = -tau);
+        the fit R^2 is of that recording's measured charge points.
         """
-        from reports.report_builder import _build_charge_duration_figure
+        from reports.report_builder import (
+            _build_charge_duration_figure,
+            recording_label_and_note,
+        )
         from parser.strength_duration_parser import charge_duration_r_squared
 
-        plabel, date_str, points, rheobase, tau = self._sd_context_for_selected(pid, date)
-        r2 = charge_duration_r_squared(points, rheobase, tau)
-        fig = _build_charge_duration_figure(
-            plabel, points, rheobase, tau, r2, date_str, self._target_suffix() or None,
-        )
-        return fig, None, {
-            "rheobase_mA": rheobase,
-            "tau_sd_ms": tau,
-            "r_squared": r2,
-            "sd_point_count": len(points),
-        }
+        plabel, date_str, recordings = self._sd_context_for_selected(pid, date)
+        total = len(recordings)
+        base_label = self._target_suffix() or None
+        figures: list = []
+        keys: list = []
+        per_key: dict = {}
+        for index, rec in enumerate(recordings):
+            label, note = recording_label_and_note(
+                rec["muscle"], rec["side"], index, total, base_label,
+            )
+            r2 = charge_duration_r_squared(
+                rec["points"], rec["rheobase"], rec["tau"],
+            )
+            figures.append(_build_charge_duration_figure(
+                plabel, rec["points"], rec["rheobase"], rec["tau"], r2,
+                date_str, label, note,
+            ))
+            key = f"recording_{index + 1}"
+            keys.append(key)
+            per_key[key] = {
+                "rheobase_mA": rec["rheobase"],
+                "tau_sd_ms": rec["tau"],
+                "r_squared": r2,
+                "sd_point_count": len(rec["points"]),
+            }
+
+        first = per_key[keys[0]]
+        data = dict(first)
+        if total == 1:
+            return figures[0], None, data
+        data["figure_keys"] = keys
+        data["recordings"] = per_key
+        return figures, [None] * total, data
 
     # ── Header figure ─────────────────────────────────────
 

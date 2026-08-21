@@ -197,6 +197,14 @@ def caption_for(
     norm_type = str(graph_type).strip().lower().replace("-", "_").replace(" ", "_")
     metric_label = _measure_display_label(measure)
 
+    # Multi-recording SR-SD results key each figure's own values under
+    # "recordings" so a caption quotes the recording it sits beneath rather
+    # than repeating the first recording's values under every figure.
+    if figure_key and isinstance(plot_data.get("recordings"), dict):
+        keyed = plot_data["recordings"].get(figure_key)
+        if isinstance(keyed, dict):
+            plot_data = keyed
+
     # --- Stimulus-Response (peripheral recruitment scatter) ---
     if norm_type == "stimulus_response":
         max_cmap = plot_data.get("sr_max_cmap_1ms")
