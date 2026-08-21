@@ -743,8 +743,10 @@ def recording_label_and_note(
     A visit with a single recording keeps *base_label* untouched and no note,
     so the overwhelmingly common case renders exactly as before.  With several
     recordings, one whose side is known is labelled by it (``Left FDI``); one
-    whose side is unknown is numbered (``FDI — recording 1 of 2``) and carries
-    the :func:`unattributed_recording_note` caveat.
+    whose side is unknown is numbered (``FDI (1 of 2)`` — kept short so the
+    longest figure titles still fit) and carries the
+    :func:`unattributed_recording_note` caveat, which spells out what the
+    numbering means.
     """
     if total <= 1:
         return base_label, None
@@ -753,7 +755,7 @@ def recording_label_and_note(
         return target_label(muscle_key, side_key), None
     base = muscle_key or base_label or "SR-SD"
     return (
-        f"{base} — recording {index + 1} of {total}",
+        f"{base} ({index + 1} of {total})",
         unattributed_recording_note(muscle_key or None),
     )
 
