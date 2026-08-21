@@ -1506,15 +1506,24 @@ class AppController:
             for key in order
         ]
 
-    def _target_scoped_dataframe(self) -> pd.DataFrame:
+    def _target_scoped_dataframe(self, graph_type: str | None = None) -> pd.DataFrame:
         """The working DataFrame, narrowed to the single selected target.
 
         The specially-built figures (SR/SD curves, CMAP/MUNIX tables) read
         their rows straight from the frame instead of going through
         ``plot_mem_graph``, so the target filter has to be applied for them
         here rather than via a ``data_df`` keyword.
+
+        *graph_type* exempts the figures that describe the whole **visit**
+        rather than one recording -- the nerve-conduction tables read the same
+        whichever muscle is being looked at, so narrowing them hides a result
+        recorded from another muscle or side. The SR and SD curves are
+        deliberately not exempt: a left-APB recruitment curve is a different
+        recording from the right APB's.
         """
         df = self._require_dataframe()
+        if graph_type and str(graph_type).strip().lower() in self._TARGET_INDEPENDENT_GRAPH_TYPES:
+            return df
         targets = self.get_selected_targets()
         if len(targets) == 1:
             return self._get_target_filtered_df(targets[0], df=df)
@@ -1554,7 +1563,7 @@ class AppController:
         )
         from processing.visualizer import format_participant_label
 
-        df = self._target_scoped_dataframe()
+        df = self._target_scoped_dataframe("cmap_table")
 
         date_str = date.strftime(self._DATE_FMT)
         p_rows = df[pd.to_numeric(df["ID"], errors="coerce") == pid]
@@ -1576,7 +1585,7 @@ class AppController:
         )
         from processing.visualizer import format_participant_label
 
-        df = self._target_scoped_dataframe()
+        df = self._target_scoped_dataframe("munix_table")
 
         date_str = date.strftime(self._DATE_FMT)
         p_rows = df[pd.to_numeric(df["ID"], errors="coerce") == pid]
@@ -2396,7 +2405,16 @@ class AppController:
         # A single selected target narrows the participant's own rows to that
         # muscle/side. Applied after the cortex branches so it composes with
         # them; the reference cohort is left pooled either way.
-        if len(targets) == 1:
+        #
+        # Graph types that describe the whole *visit* rather than one recording
+        # are exempt, which is what _TARGET_INDEPENDENT_GRAPH_TYPES already says
+        # of them: the visit date list and the nerve-conduction tables read the
+        # same whichever muscle is being looked at. Narrowing them hid visits
+        # recorded from another muscle or side -- SNBR-192's timeline showed one
+        # of their two visits -- and, when the selected target belonged to a
+        # different visit than the selected date, raised "No rows found for
+        # participant ID 192 on 20/08/2026" outright.
+        if len(targets) == 1 and norm_type not in self._TARGET_INDEPENDENT_GRAPH_TYPES:
             # ...except on a graph that overlays hemispheres, which has to be
             # given both of them. The target carries a side, and the page can
             # only offer the targets of the *selected visit* -- so a participant
