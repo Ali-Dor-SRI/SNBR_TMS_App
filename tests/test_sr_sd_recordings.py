@@ -190,15 +190,17 @@ def test_comments_never_override_sr_sites(tmp_path):
 
 
 def test_comments_never_touch_a_tms_file(tmp_path):
-    # The same comment on a cortical file must be ignored: it is protocol
-    # shorthand there, and Stim/record already carries the recorded side.
+    # A side-shaped comment on a cortical file must be ignored even when the
+    # file's own Stim/record names no side (the older no-arrow format): the
+    # comment is protocol shorthand there, not a recording target. Only files
+    # carrying an SR or SD block read their comment.
     path = _tms_mem(
         tmp_path, "SNBR-300-TP3C60821A.MEM",
-        stim_record="L->R", muscle="FDI", comments="LEFT TA",
+        stim_record="L-R.", muscle="FDI", comments="LEFT TA",
     )
     record = parse_mem_file(path)
     assert record["Muscle"] == "FDI"
-    assert record["Recorded_side"] == "R"
+    assert record["Recorded_side"] is None
 
 
 # ---------------------------------------------------------------------------
