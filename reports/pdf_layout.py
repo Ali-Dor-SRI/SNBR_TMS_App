@@ -3,15 +3,15 @@ Page composition for participant PDF reports.
 
 This module takes the matplotlib figures produced by
 :mod:`reports.report_builder` and arranges them onto portrait US-Letter
-(8.5 x 11) pages, four visualizations per page in a 2×2 grid, each with
-a raw-value caption line printed underneath.  It also builds the
-first-page letterhead banner using the two institutional PNG assets in
-``SNBR_TMS_App/icons``.
+(8.5 x 11) pages.  Each graph occupies **half a page**: two full-width
+visualizations are stacked per page, each with a raw-value caption line
+printed underneath.  It also builds the first-page letterhead banner
+using the two institutional PNG assets in ``SNBR_TMS_App/icons``.
 
 Public API
 ----------
 ReportItem                            -- figure + caption + section key
-compose_four_per_page(items)          -> list[Figure]
+compose_two_per_page(items)           -> list[Figure]
 build_letterhead_banner_page(summary) -> Figure
 """
 
@@ -153,15 +153,20 @@ def _place_caption_axis(
 
 
 # ---------------------------------------------------------------------------
-# Four-per-page composition (2×2 grid)
+# Half-page composition (two full-width items stacked per page)
 # ---------------------------------------------------------------------------
 
 # Slot layout on each body page:
-#   0 = top-left,    1 = top-right
-#   2 = bottom-left, 3 = bottom-right
-ITEMS_PER_PAGE = 4
-_GRID_COLS = 2
+#   0 = top half, 1 = bottom half
+# Each slot spans the full content width and half the content height, so a
+# chosen graph occupies half of a Letter page.
+ITEMS_PER_PAGE = 2
+_GRID_COLS = 1
 _GRID_ROWS = 2
+
+# Vertical band reserved for the caption at the foot of each half-page cell.
+_CAPTION_HEIGHT_INCHES = 0.45
+_CAPTION_FONTSIZE = 9.5
 
 
 def _slot_rects(slot_index: int) -> tuple[
@@ -169,11 +174,11 @@ def _slot_rects(slot_index: int) -> tuple[
     tuple[float, float, float, float],
 ]:
     """Return (image_rect, caption_rect) in figure fractions for one of the
-    four slots in the 2×2 grid.
+    two half-page slots.
 
-    Slot indices are laid out left-to-right, top-to-bottom (0=TL, 1=TR,
-    2=BL, 3=BR). Each cell is divided vertically into an image band and
-    a thin caption band beneath it.
+    Slot indices run top-to-bottom (0 = top half, 1 = bottom half). Each
+    cell spans the full content width and is divided vertically into an
+    image band and a thin caption band beneath it.
     """
     margin_x = PAGE_MARGIN / PAGE_SIZE[0]
     margin_y = PAGE_MARGIN / PAGE_SIZE[1]
@@ -184,21 +189,19 @@ def _slot_rects(slot_index: int) -> tuple[
     content_width = 1.0 - 2.0 * margin_x
     content_height = 1.0 - 2.0 * margin_y
 
-    cell_width = (content_width - inner_gap_x) / _GRID_COLS
-    cell_height = (content_height - inner_gap_y) / _GRID_ROWS
+    cell_width = (content_width - inner_gap_x * (_GRID_COLS - 1)) / _GRID_COLS
+    cell_height = (content_height - inner_gap_y * (_GRID_ROWS - 1)) / _GRID_ROWS
 
     col = slot_index % _GRID_COLS
-    row = slot_index // _GRID_COLS  # 0 = top row, 1 = bottom row
+    row = slot_index // _GRID_COLS  # 0 = top row
 
     cell_left = margin_x + col * (cell_width + inner_gap_x)
-    # Top row sits higher on the page → larger 'bottom' fraction
-    if row == 0:
-        cell_bottom = margin_y + cell_height + inner_gap_y
-    else:
-        cell_bottom = margin_y
+    # Row 0 sits highest on the page → largest 'bottom' fraction.
+    rows_below = (_GRID_ROWS - 1) - row
+    cell_bottom = margin_y + rows_below * (cell_height + inner_gap_y)
 
-    # Caption takes the bottom ~0.4" of each cell, image takes the rest.
-    caption_height = 0.4 / PAGE_SIZE[1]
+    # Caption takes the bottom band of each cell, image takes the rest.
+    caption_height = _CAPTION_HEIGHT_INCHES / PAGE_SIZE[1]
     image_bottom = cell_bottom + caption_height
     image_height = cell_height - caption_height
 
@@ -213,12 +216,13 @@ def _new_page_figure():
     return plt.figure(figsize=PAGE_SIZE)
 
 
-def compose_four_per_page(items: list[ReportItem]) -> list:
+def compose_two_per_page(items: list[ReportItem]) -> list:
     """Compose a sequence of ``ReportItem`` s into portrait Letter pages.
 
-    Every page hosts up to four items in a 2×2 grid (top-left, top-right,
-    bottom-left, bottom-right). Trailing slots on the final page are left
-    blank when the item count isn't divisible by four.
+    Every chosen graph occupies half a page: each page hosts up to two
+    full-width items, one in the top half and one in the bottom half. The
+    trailing slot on the final page is left blank when the item count is
+    odd.
 
     Returns a list of matplotlib figures in page order. The caller is
     responsible for saving these via ``PdfPages`` and closing them.
@@ -236,7 +240,8 @@ def compose_four_per_page(items: list[ReportItem]) -> list:
             _place_image_axis(page_fig, image, image_rect)
             if item.caption:
                 _place_caption_axis(
-                    page_fig, item.caption, caption_rect, fontsize=8.5,
+                    page_fig, item.caption, caption_rect,
+                    fontsize=_CAPTION_FONTSIZE,
                 )
             i += 1
         pages.append(page_fig)
@@ -244,8 +249,9 @@ def compose_four_per_page(items: list[ReportItem]) -> list:
 
 
 # Backwards-compatibility alias — older imports / external scripts still
-# reach for ``compose_two_per_page``. Treat it as 4-per-page going forward.
-compose_two_per_page = compose_four_per_page
+# reach for ``compose_four_per_page``. Composition is half-a-page per graph
+# going forward, so both names now build the same two-per-page layout.
+compose_four_per_page = compose_two_per_page
 
 
 # ---------------------------------------------------------------------------

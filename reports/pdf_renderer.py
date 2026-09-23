@@ -5,8 +5,9 @@ This module is the final step in the report pipeline:
 
     parser -> df_builder -> report_builder (figures) -> **pdf_renderer** (PDF)
 
-Every page is rendered as portrait US Letter (8.5" x 11") with up to two
-visualizations per page.  The first page carries an institutional
+Every page is rendered as portrait US Letter (8.5" x 11").  Each chosen
+graph occupies half a page, so up to two full-width visualizations are
+stacked per page.  The first page carries an institutional
 letterhead banner with the participant summary beneath it.  Each
 subsequent visualization may carry a short caption line showing raw
 values (patient, controls, ALS).
@@ -27,7 +28,7 @@ import pandas as pd
 from reports.pdf_layout import (
     ReportItem,
     build_letterhead_banner_page,
-    compose_four_per_page,
+    compose_two_per_page,
     generation_date_string,
     stamp_page_footer,
 )
@@ -128,7 +129,7 @@ def render_figures_to_pdf(
     first_page = build_letterhead_banner_page(
         summary_fig=summary_item.figure if summary_item is not None else None,
     )
-    body_pages = compose_four_per_page(body_items)
+    body_pages = compose_two_per_page(body_items)
 
     # Stamp every page (cover included) with the generation date and page
     # number. The count includes the cover, so the cover reads "Page 1 of N".

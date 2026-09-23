@@ -68,7 +68,7 @@ def test_render_stamps_every_page_with_cover_as_page_one(monkeypatch, tmp_path):
     summary_fig = plt.figure(figsize=(3, 2))
     items = [ReportItem(figure=summary_fig, caption=None, section_key="summary")]
     body_figs = []
-    for _ in range(5):  # 5 body items -> ceil(5/4) = 2 body pages
+    for _ in range(5):  # half a page each -> ceil(5/2) = 3 body pages
         f = plt.figure(figsize=(3, 2))
         body_figs.append(f)
         items.append(ReportItem(figure=f, caption=None, section_key="x"))
@@ -77,8 +77,8 @@ def test_render_stamps_every_page_with_cover_as_page_one(monkeypatch, tmp_path):
 
     assert out.is_file()
     assert out.stat().st_size > 0
-    # Cover + 2 body pages = 3 pages; cover is page 1 of 3.
-    assert calls == [(1, 3), (2, 3), (3, 3)]
+    # Cover + 3 body pages = 4 pages; cover is page 1 of 4.
+    assert calls == [(1, 4), (2, 4), (3, 4), (4, 4)]
 
     plt.close(summary_fig)
     for f in body_figs:

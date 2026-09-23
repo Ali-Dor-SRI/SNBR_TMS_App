@@ -171,8 +171,9 @@ selection into a figure via `plot_mem_graph`.
 
 - `report_builder.py` decides which figure belongs to which report "section" and attaches a
   short caption (from `captions.py`) with the raw numbers under each figure.
-- `pdf_layout.py` defines a `ReportItem` (figure + caption + section) and lays items out **four per
-  page** in a 2×2 grid, with the **institutional letterhead** (two PNGs from `icons/`) on page 1.
+- `pdf_layout.py` defines a `ReportItem` (figure + caption + section) and gives each graph **half a
+  page** — two full-width items stacked per page — with the **institutional letterhead** (two PNGs
+  from `icons/`) on page 1.
 - `pdf_renderer.py` stitches the pages into the final multi-page PDF using matplotlib's `PdfPages`.
 
 > **Two ways a report gets built (worth knowing):** the interactive **GUI** builds figures as you
