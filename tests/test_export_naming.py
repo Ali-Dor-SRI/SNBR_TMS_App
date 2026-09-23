@@ -66,9 +66,11 @@ def test_dataframe_name_is_the_export_date():
     assert default_dataframe_stem(datetime(2026, 8, 19)) == "df_20260819"
 
 
-def test_report_name_is_study_and_participant():
+def test_report_name_is_study_participant_and_visit():
+    """The visit date tells a baseline from a follow-up in one folder."""
+    assert default_report_stem("SNBR", 80, "18/08/2026") == "report_SNBR_080_20260818"
+    assert default_report_stem("NIALS", 3, datetime(2024, 4, 22)) == "report_NIALS_003_20240422"
     assert default_report_stem("SNBR", 80) == "report_SNBR_080"
-    assert default_report_stem("NIALS", 3) == "report_NIALS_003"
 
 
 def test_participant_number_is_padded_to_match_the_mem_filenames():
@@ -80,7 +82,7 @@ def test_participant_number_is_padded_to_match_the_mem_filenames():
 def test_missing_parts_do_not_leave_stray_underscores():
     """A participant with no study recorded still gets a usable name."""
     assert default_graph_stem(None, 213, "Visit Timeline", None) == "213_Visit_Timeline"
-    assert default_report_stem("", 80) == "report_080"
+    assert default_report_stem("", 80, None) == "report_080"
 
 
 def test_characters_windows_rejects_are_dropped():
@@ -123,7 +125,7 @@ def test_blank_name_is_filled_in(controller, tmp_path):
     pdf_out = Path(controller.resolve_export_path("pdf"))
 
     assert csv_out.name == f"{default_dataframe_stem()}.csv"
-    assert pdf_out.name == "report_SNBR_080.pdf"
+    assert pdf_out.name == "report_SNBR_080_20260818.pdf"
     # ...into the folder the user's saved defaults already point at.
     assert csv_out.parent == tmp_path / "df"
     assert pdf_out.parent == tmp_path / "reports"
@@ -139,7 +141,7 @@ def test_default_names_are_not_stamped_on_top(controller, tmp_path):
     """They already carry the study and participant; stamping would repeat them."""
     controller._default_export_pdf = str(tmp_path / "report")
     out = Path(controller.resolve_export_path("pdf"))
-    assert out.name == "report_SNBR_080.pdf"
+    assert out.name == "report_SNBR_080_20260818.pdf"
     assert "ID80" not in out.name
 
 
@@ -147,7 +149,7 @@ def test_a_box_holding_only_a_folder_gets_the_default_name(controller, tmp_path)
     folder = tmp_path / "picked"
     folder.mkdir()
     out = Path(controller.resolve_export_path("pdf", str(folder)))
-    assert out == folder / "report_SNBR_080.pdf"
+    assert out == folder / "report_SNBR_080_20260818.pdf"
 
 
 def test_export_folder_falls_back_to_the_loaded_archive(controller, tmp_path):
@@ -172,10 +174,10 @@ def test_study_is_resolved_by_visit_date_not_number_alone():
     c.set_dataframe(df)
 
     c.set_selected_participant(3, datetime(2022, 9, 5))
-    assert c.default_export_filename("pdf") == "report_NIALS_003.pdf"
+    assert c.default_export_filename("pdf") == "report_NIALS_003_20220905.pdf"
 
     c.set_selected_participant(3, datetime(2026, 8, 18))
-    assert c.default_export_filename("pdf") == "report_SNBR_003.pdf"
+    assert c.default_export_filename("pdf") == "report_SNBR_003_20260818.pdf"
 
 
 # --------------------------------------------------------------------------
@@ -293,7 +295,7 @@ def test_a_chosen_folder_alone_gets_the_default_name(controller, tmp_path):
         tmp_path / f"{default_dataframe_stem()}.csv"
     )
     assert Path(controller.resolve_export_target("pdf", str(tmp_path))) == (
-        tmp_path / "report_SNBR_080.pdf"
+        tmp_path / "report_SNBR_080_20260818.pdf"
     )
 
 
@@ -323,7 +325,7 @@ def test_an_auto_named_export_into_a_chosen_folder_is_uniquified(controller, tmp
     first = Path(controller.resolve_export_target("pdf", str(tmp_path)))
     first.write_text("x", encoding="utf-8")
     second = Path(controller.resolve_export_target("pdf", str(tmp_path)))
-    assert second.name == "report_SNBR_080_2.pdf"
+    assert second.name == "report_SNBR_080_20260818_2.pdf"
 
 
 def test_graphs_follow_the_same_rules_as_the_other_exports(controller, tmp_path):

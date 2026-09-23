@@ -7,7 +7,7 @@ empty is therefore allowed everywhere, and these rules fill it in.
 ======================  ==========================================
 Graph (PNG)             ``<Study>_<ID>_<graph type>_<visit date>``
 Dataframe (CSV)         ``df_<export date>``
-Report (PDF)            ``report_<Study>_<ID>``
+Report (PDF)            ``report_<Study>_<ID>_<visit date>``
 ======================  ==========================================
 
 The participant number is zero-padded to three digits and the date is
@@ -25,7 +25,7 @@ Public API
 ----------
 default_graph_stem(study, participant_id, graph_label, visit_date) -> str
 default_dataframe_stem(export_date)                               -> str
-default_report_stem(study, participant_id)                        -> str
+default_report_stem(study, participant_id, visit_date)            -> str
 unique_path(path)                                                 -> Path
 """
 
@@ -109,10 +109,16 @@ def default_dataframe_stem(export_date=None) -> str:
     return _join("df", _format_date(export_date or datetime.now()))
 
 
-def default_report_stem(study, participant_id) -> str:
-    """``report_SNBR_080``."""
+def default_report_stem(study, participant_id, visit_date=None) -> str:
+    """``report_SNBR_080_20260818``.
+
+    The visit date is what tells a baseline report from a follow-up for the
+    same participant once both sit in one folder -- the dispatch app keys its
+    ledger on it. Omitted (older callers), the name is ``report_SNBR_080``.
+    """
     return _join(
         "report", sanitize_token(study), format_participant(participant_id),
+        _format_date(visit_date),
     )
 
 
