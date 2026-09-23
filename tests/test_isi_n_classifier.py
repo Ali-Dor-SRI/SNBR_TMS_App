@@ -267,8 +267,10 @@ def test_skips_new_participant_ids_not_in_redcap(tmp_path):
         py_df, rc_export, dict_csv, template_csv, tmp_path,
     )
 
-    assert list(import_df["record_id"]) == [1]
-    assert 999 not in set(import_df["record_id"])
+    # record_id is REDCap's own key, copied over as text; this export holds
+    # it unpadded, so it comes back "1" (see test_redcap_record_id_padding.py).
+    assert list(import_df["record_id"]) == ["1"]
+    assert "999" not in set(import_df["record_id"])
     assert stats["skipped_new_ids"] == [999]
 
 
@@ -317,9 +319,10 @@ def test_include_new_ids_toggle_on_adds_new_participant_rows(tmp_path):
     )
 
     ids = set(import_df["record_id"])
-    # The existing participant keeps REDCap's own integer key; the new one is
-    # zero-padded (see test_redcap_record_id_padding.py).
-    assert 1 in ids and "999" in ids
+    # The existing participant keeps REDCap's own key verbatim -- unpadded in
+    # this export -- while the new one is zero-padded by us (see
+    # test_redcap_record_id_padding.py).
+    assert ids == {"1", "999"}
     assert stats["skipped_new_ids"] == []
     assert stats["new_ids_added"] == [999]
     # The new-participant row should have an empty event name for the user

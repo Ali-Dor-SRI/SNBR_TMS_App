@@ -130,23 +130,27 @@ def _is_valid_number(val) -> bool:
         return False
 
 
-def format_record_id(pid, *, is_new: bool):
+def format_record_id(pid, *, is_new: bool, existing_key=None):
     """The ``record_id`` to write for one participant.
 
-    A **new** record — a participant REDCap has never seen, created by this
-    import — is zero-padded to :data:`RECORD_ID_WIDTH`, so the lab's numbering
-    reads ``001``/``010``/``100`` as it does in the ``.MEM`` filenames and on
-    the reports. Numbers already wider than that are left alone.
+    An **existing** record is named by REDCap's own key, copied across
+    verbatim from *existing_key* — whatever text the data export holds for
+    that row. REDCap matches an import row to its record on that string, and
+    this project writes them zero-padded (``005``), so an import carrying
+    ``5`` does not name record ``005``: REDCap **creates a second record**
+    rather than updating the one that is there. Copying the key over cannot
+    get that wrong, whatever width or format a project uses.
 
-    An **existing** record keeps the plain integer, deliberately. Its
-    ``record_id`` is REDCap's own primary key for a row that is already there;
-    rewriting ``7`` as ``007`` would no longer name the same record, so the
-    import would miss its target instead of updating it.
+    A **new** record — a participant REDCap has never seen, created by this
+    import — has no key yet, so this export decides it: zero-padded to
+    :data:`RECORD_ID_WIDTH`, reading ``001``/``010``/``100`` as the lab
+    numbers participants in the ``.MEM`` filenames and on the reports.
+    Numbers already wider than that are left alone.
     """
-    number = int(pid)
-    if not is_new:
-        return number
-    return f"{number:0{RECORD_ID_WIDTH}d}"
+    key = "" if existing_key is None else str(existing_key).strip()
+    if not is_new and key:
+        return key
+    return f"{int(pid):0{RECORD_ID_WIDTH}d}"
 
 
 def _validate_against_template(
@@ -408,9 +412,16 @@ def generate_redcap_import(
     py_rc["_cortex_py"] = py_snbr["cortex_py"].values
 
     # -- 2. Load REDCap data ---------------------------------------------------
-    rc_df = pd.read_csv(redcap_data_csv, low_memory=False)
+    # ``record_id`` is read as text and kept: it is REDCap's own key for the
+    # row, and this project's keys are zero-padded ("005"). Letting pandas
+    # type the column numerically throws the padding away, and an import row
+    # keyed "5" creates a new record instead of updating "005".
+    rc_df = pd.read_csv(
+        redcap_data_csv, low_memory=False, dtype={"record_id": str}
+    )
+    rc_df["_record_key"] = rc_df["record_id"].fillna("").astype(str).str.strip()
     rc_df["record_id"] = pd.to_numeric(
-        rc_df["record_id"], errors="coerce"
+        rc_df["_record_key"], errors="coerce"
     ).astype("Int64")
     rc_df["tt_test_date"] = rc_df["tt_test_date"].astype(str).str.strip()
     rc_df["_cortex_py"] = (
@@ -474,11 +485,13 @@ def generate_redcap_import(
             stats["matched"] += 1
             rc_row = rc_match.iloc[0]
             event_name = rc_row["redcap_event_name"]
+            existing_key = rc_row["_record_key"]
         else:
             # New participant — no existing REDCap row. Emit the parsed values
             # with an empty event_name so the user can fill it before import.
             rc_row = None
             event_name = ""
+            existing_key = None
             if int(pid) not in stats["new_ids_added"]:
                 stats["new_ids_added"].append(int(pid))
 
@@ -543,7 +556,9 @@ def generate_redcap_import(
                 stats["cells_changed"] += 1
 
         if changed:
-            record_id = format_record_id(pid, is_new=is_new_participant)
+            record_id = format_record_id(
+                pid, is_new=is_new_participant, existing_key=existing_key,
+            )
             row = {"record_id": record_id, "redcap_event_name": event_name}
             row.update(changed)
             import_rows.append(row)

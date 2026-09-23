@@ -116,8 +116,12 @@ def generate_import() -> pd.DataFrame:
 
     # -- 2. Load REDCap data ---------------------------------------------------
     print("Loading REDCap data...")
-    rc_df = pd.read_csv(REDCAP_CSV, low_memory=False)
-    rc_df["record_id"] = pd.to_numeric(rc_df["record_id"], errors="coerce").astype("Int64")
+    # record_id is REDCap's own key and is read as text: this project pads it
+    # to three digits ("005"), and an import row keyed "5" names no record, so
+    # REDCap creates one. Match on the number, write the key back verbatim.
+    rc_df = pd.read_csv(REDCAP_CSV, low_memory=False, dtype={"record_id": str})
+    rc_df["_record_key"] = rc_df["record_id"].fillna("").astype(str).str.strip()
+    rc_df["record_id"] = pd.to_numeric(rc_df["_record_key"], errors="coerce").astype("Int64")
     rc_df["tt_test_date"] = rc_df["tt_test_date"].astype(str).str.strip()
     rc_df["_cortex_py"] = rc_df["cortex"].astype(str).str.strip().apply(_normalise_cortex_to_py)
 
@@ -150,6 +154,7 @@ def generate_import() -> pd.DataFrame:
         stats["matched"] += 1
         rc_row = rc_match.iloc[0]
         event_name = rc_row["redcap_event_name"]
+        record_key = rc_row["_record_key"]
 
         # Compare each TMS column
         changed_cols: dict[str, float | str] = {}
@@ -175,7 +180,7 @@ def generate_import() -> pd.DataFrame:
 
         if changed_cols:
             row = {
-                "record_id": int(pid),
+                "record_id": record_key,
                 "redcap_event_name": event_name,
             }
             row.update(changed_cols)
@@ -236,14 +241,14 @@ def generate_import() -> pd.DataFrame:
     print("  Per-participant breakdown:")
     for _, row in import_df.iterrows():
         n_vals = sum(1 for c in tms_cols_present if pd.notna(row.get(c)))
-        print(f"    ID {int(row['record_id']):>4d}  event={row['redcap_event_name']:<30s}  cols={n_vals}")
+        print(f"    ID {str(row['record_id']):>4s}  event={row['redcap_event_name']:<30s}  cols={n_vals}")
     print()
 
     # -- 6. Quality checks -----------------------------------------------------
     print("  Quality checks:")
 
     # Check all record_ids exist in REDCap
-    valid_ids = set(rc_df["record_id"].dropna().unique())
+    valid_ids = set(rc_df["_record_key"].unique())
     bad_ids = [r for r in import_df["record_id"] if r not in valid_ids]
     print(f"    record_id validation:    {'PASS' if not bad_ids else f'FAIL — {bad_ids}'}")
 
