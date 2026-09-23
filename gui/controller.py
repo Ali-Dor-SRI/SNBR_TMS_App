@@ -18,6 +18,7 @@ from core.user_settings import (
     save_defaults,
     KEY_MEM_DIR, KEY_CSP_DIR, KEY_CMAP_DIR, KEY_CSV_FILE,
     KEY_MEM_RECURSIVE, KEY_CSP_RECURSIVE, KEY_CMAP_RECURSIVE,
+    KEY_XLSX_DIR, KEY_XLSX_RECURSIVE, KEY_PLOT_PULSES,
     KEY_EXPORT_CSV, KEY_EXPORT_PDF, KEY_SYNC_PAIRS,
     KEY_EXCLUDED_MEASUREMENTS, KEY_EXCLUDED_PARTICIPANTS,
     KEY_OUTLIER_BOUNDS,
@@ -35,6 +36,12 @@ from core.user_settings import (
     KEY_EMAIL_SUBJECT, KEY_EMAIL_BODY, KEY_EMAIL_REMEMBER_PASSWORD,
 )
 from parser.recording_target import MUSCLE_COLUMN, SIDE_COLUMN, target_key, target_label
+from parser.xlsx_parser import (
+    PULSE_MEASURES,
+    extract_pulse_readings,
+    index_workbooks,
+    tokens_in,
+)
 from reports.export_naming import (
     default_dataframe_stem,
     default_graph_stem,
@@ -117,6 +124,18 @@ class AppController:
         # its source file.
         self._mem_file_index: dict | None = None
         self._mem_index_key: tuple | None = None
+        # The QtracP per-stimulus Excel exports: optional folders, the same
+        # memoized index idea keyed by acquisition token, a per-workbook cache
+        # of parsed readings, and the page's on/off choice for drawing them.
+        self._xlsx_paths: list[str] = []
+        self._xlsx_recursive: bool = False
+        self._xlsx_index: dict | None = None
+        self._xlsx_index_key: tuple | None = None
+        self._xlsx_readings_cache: dict[tuple, dict] = {}
+        self._plot_pulse_variability: bool = False
+        # Outcome of the last profile graph's overlay request (see
+        # _pulse_readings_for_visit), so a run can say why dots are missing.
+        self._last_pulse_overlay: dict | None = None
         # True when the working DataFrame was loaded from a schema-stale archive
         # WITHOUT re-parsing (the fast "archive as-is" path), so its newer parser
         # columns (e.g. SR/SD) are present-but-empty. Used to avoid exporting a
@@ -162,6 +181,9 @@ class AppController:
         self._mem_recursive = bool(saved.get(KEY_MEM_RECURSIVE, False))
         self._csp_recursive = bool(saved.get(KEY_CSP_RECURSIVE, False))
         self._cmap_recursive = bool(saved.get(KEY_CMAP_RECURSIVE, False))
+
+        self._xlsx_paths = _as_path_list(saved.get(KEY_XLSX_DIR, ""))
+        self._xlsx_recursive = bool(saved.get(KEY_XLSX_RECURSIVE, False))
 
         self._csv_path = saved.get(KEY_CSV_FILE, "")
         if not self._csv_path:
@@ -218,6 +240,10 @@ class AppController:
         self._mem_recursive = False
         self._csp_recursive = False
         self._cmap_recursive = False
+        self._xlsx_paths = []
+        self._xlsx_recursive = False
+        self._xlsx_index = None
+        self._xlsx_index_key = None
         self._csv_path = ""
         self._default_export_csv = ""
         self._default_export_pdf = ""
@@ -228,22 +254,25 @@ class AppController:
     def set_paths(
         self, mem_path, csp_path="", csv_path: str = "",
         cmap_path="",
+        xlsx_path="",
         *,
         mem_recursive: bool | None = None,
         csp_recursive: bool | None = None,
         cmap_recursive: bool | None = None,
+        xlsx_recursive: bool | None = None,
     ):
         """Save the user-selected import paths.
 
-        *mem_path*, *csp_path* and *cmap_path* may each be a single directory
-        string or a list of directories (the user can pick files from several
-        locations).  *csv_path* is always a single archive file.  The
-        ``*_recursive`` flags toggle whether subfolders are scanned for each
-        field; ``None`` means leave the existing value unchanged.
+        *mem_path*, *csp_path*, *cmap_path* and *xlsx_path* may each be a
+        single directory string or a list of directories (the user can pick
+        files from several locations).  *csv_path* is always a single archive
+        file.  The ``*_recursive`` flags toggle whether subfolders are scanned
+        for each field; ``None`` means leave the existing value unchanged.
         """
         self._mem_paths = _as_path_list(mem_path)
         self._csp_paths = _as_path_list(csp_path)
         self._cmap_paths = _as_path_list(cmap_path)
+        self._xlsx_paths = _as_path_list(xlsx_path)
         self._csv_path = csv_path
         if mem_recursive is not None:
             self._mem_recursive = bool(mem_recursive)
@@ -251,6 +280,8 @@ class AppController:
             self._csp_recursive = bool(csp_recursive)
         if cmap_recursive is not None:
             self._cmap_recursive = bool(cmap_recursive)
+        if xlsx_recursive is not None:
+            self._xlsx_recursive = bool(xlsx_recursive)
 
     def get_paths(self) -> dict:
         """Return the current import paths and per-field recursion flags."""
@@ -258,10 +289,12 @@ class AppController:
             "mem_path": list(self._mem_paths),
             "csp_path": list(self._csp_paths),
             "cmap_path": list(self._cmap_paths),
+            "xlsx_path": list(self._xlsx_paths),
             "csv_path": self._csv_path,
             "mem_recursive": self._mem_recursive,
             "csp_recursive": self._csp_recursive,
             "cmap_recursive": self._cmap_recursive,
+            "xlsx_recursive": self._xlsx_recursive,
         }
 
     def validate_paths(self) -> list[str]:
@@ -282,6 +315,10 @@ class AppController:
         for p in self._cmap_paths:
             if not Path(p).is_dir():
                 errors.append(f"CMAP files directory does not exist:\n{p}")
+
+        for p in self._xlsx_paths:
+            if not Path(p).is_dir():
+                errors.append(f"Qtrac Excel exports directory does not exist:\n{p}")
 
         if self._csv_path and not Path(self._csv_path).is_file():
             errors.append(f"Archive CSV file does not exist:\n{self._csv_path}")
@@ -2614,6 +2651,23 @@ class AppController:
                 # The profile builders detect the split themselves; see
                 # _CORTEX_OVERLAY_AUTODETECT_TYPES.
 
+        # The individual pulses behind a profile's values, when the user asked
+        # for them and the recording's Excel export is on hand. Anything short
+        # of that draws the profile from the .MEM values alone, and
+        # _last_pulse_overlay records why.
+        self._last_pulse_overlay = None
+        pulse_measure = self._pulse_measure_key(measure)
+        if (
+            self._plot_pulse_variability
+            and norm_type in self._PROFILE_GRAPH_TYPES
+            and pulse_measure
+        ):
+            readings = self._pulse_readings_for_visit(
+                pid, date, kwargs["data_df"], pulse_measure,
+            )
+            if readings:
+                kwargs["pulse_readings"] = readings
+
         result = (
             plot_mem_graph(graph_type=graph_type, measure=measure, **kwargs)
             if measure is not None
@@ -2731,6 +2785,124 @@ class AppController:
     def save_selected_graphs_default(self, keys: list[str]) -> None:
         """Persist the graphs Quick Start should put in the report."""
         save_defaults(**{KEY_SELECTED_GRAPHS: [str(k) for k in keys]})
+
+    # ── Individual pulses from the Qtrac Excel exports ─────
+
+    def set_pulse_variability(self, enabled: bool) -> None:
+        """Whether the profile graphs draw the individual pulses behind each value."""
+        self._plot_pulse_variability = bool(enabled)
+
+    def get_pulse_variability(self) -> bool:
+        return self._plot_pulse_variability
+
+    def get_pulse_variability_default(self) -> bool:
+        """The saved choice, used by Quick Start and to pre-tick the page (off when unset)."""
+        return bool(load_defaults().get(KEY_PLOT_PULSES, False))
+
+    def save_pulse_variability_default(self, enabled: bool) -> None:
+        """Persist the choice. ``save_defaults`` drops a false value, which reads back as off."""
+        save_defaults(**{KEY_PLOT_PULSES: bool(enabled)})
+
+    def has_xlsx_folders(self) -> bool:
+        return bool(self._xlsx_paths)
+
+    @staticmethod
+    def _pulse_measure_key(measure) -> str | None:
+        """The measure as a pulse-readings key, or None for measures without pulses."""
+        if measure is None:
+            return None
+        key = str(measure).strip().lower().replace("-", "_").replace(" ", "_")
+        return key if key in PULSE_MEASURES else None
+
+    def _get_xlsx_index(self) -> dict:
+        """Memoized ``{token: workbook}`` over the Excel folder(s).
+
+        Same idea as :meth:`_get_mem_file_index`: rebuilt only when the paths
+        or the recursion flag change, so browsing graphs never re-scans a share.
+        """
+        key = (tuple(self._xlsx_paths), bool(self._xlsx_recursive))
+        if self._xlsx_index is None or self._xlsx_index_key != key:
+            self._xlsx_index = (
+                index_workbooks(self._xlsx_paths, recursive=self._xlsx_recursive)
+                if self._xlsx_paths else {}
+            )
+            self._xlsx_index_key = key
+        return self._xlsx_index
+
+    def _readings_for_workbook(self, path: Path) -> dict:
+        """Parsed readings for one workbook, cached on its path and mtime."""
+        try:
+            stamp = Path(path).stat().st_mtime
+        except OSError:
+            stamp = 0.0
+        cache_key = (str(path), stamp)
+        cached = self._xlsx_readings_cache.get(cache_key)
+        if cached is None:
+            cached = extract_pulse_readings(path)
+            self._xlsx_readings_cache[cache_key] = cached
+        return cached
+
+    def pulse_overlay_note(self) -> str:
+        """Why the page should expect no dots, or "" when the folders are usable."""
+        if not self._xlsx_paths:
+            return (
+                "No Qtrac Excel export folder is set on the Import Settings page, "
+                "so the profile graphs are drawn from the .MEM values alone."
+            )
+        if not self._get_xlsx_index():
+            return (
+                "No per-stimulus Excel exports were found in the selected folder(s); "
+                "the profile graphs are drawn from the .MEM values alone."
+            )
+        return ""
+
+    def get_last_pulse_overlay(self) -> dict | None:
+        """Outcome of the last profile graph's overlay request, or None if none was made."""
+        return self._last_pulse_overlay
+
+    def _pulse_readings_for_visit(self, pid, date, df, measure_key: str) -> dict:
+        """Readings, keyed by token, for the visit's recordings whose export holds *measure_key*.
+
+        Returns ``{}`` when nothing usable exists — no folder, no exports, no
+        export for these recordings, or one without that measure's pulses — so
+        the profile falls back to the .MEM values. The outcome is recorded in
+        ``_last_pulse_overlay`` either way.
+        """
+        outcome: dict = {"measure": measure_key, "drawn": False, "reason": ""}
+        self._last_pulse_overlay = outcome
+        if not self._xlsx_paths:
+            outcome["reason"] = "no Excel export folder selected"
+            return {}
+        index = self._get_xlsx_index()
+        if not index:
+            outcome["reason"] = "no per-stimulus Excel exports found"
+            return {}
+        if df is None or "source_file" not in df.columns:
+            outcome["reason"] = "no source files recorded for this visit"
+            return {}
+        rows = df[
+            (pd.to_numeric(df["ID"], errors="coerce") == pid)
+            & (df["Date"] == date.strftime(self._DATE_FMT))
+        ]
+        found: dict[str, dict] = {}
+        for cell in rows["source_file"].tolist():
+            for token in sorted(tokens_in(cell)):
+                if token in index and token not in found:
+                    found[token] = self._readings_for_workbook(index[token])
+        if not found:
+            outcome["reason"] = "no Excel export matches this recording"
+            return {}
+        usable = {
+            token: readings for token, readings in found.items()
+            if (readings.get("measures") or {}).get(measure_key)
+        }
+        if not usable:
+            outcome["reason"] = "the matching Excel export holds no pulses for this measure"
+            return {}
+        outcome["drawn"] = True
+        outcome["workbooks"] = [r["path"] for r in usable.values()]
+        outcome["warnings"] = [w for r in usable.values() for w in r.get("warnings", [])]
+        return usable
 
     # ── Quick Start ─────────────────────────────────────────
 
@@ -3142,6 +3314,7 @@ class AppController:
             "mem_dir": "",
             "csp_dir": "",
             "cmap_dir": "",
+            "xlsx_dir": "",
             "csv_file": "",
             "csv_export": "",
             "pdf_export": "",
@@ -3149,6 +3322,11 @@ class AppController:
             "graphs_skipped": [],
             "graphs_fell_back": False,
             "figure_count": 0,
+            # The individual pulses: whether they were asked for, and which
+            # profile graphs got them or fell back to the .MEM values.
+            "pulse_variability": False,
+            "pulse_overlay_drawn": [],
+            "pulse_overlay_missing": [],
             "sync_pairs": [],
             "sync_result": None,
             "skipped_steps": self.skipped_step_labels(),
@@ -3165,10 +3343,12 @@ class AppController:
                 mem_path=saved.get(KEY_MEM_DIR, ""),
                 csp_path=saved.get(KEY_CSP_DIR, ""),
                 cmap_path=saved.get(KEY_CMAP_DIR, ""),
+                xlsx_path=saved.get(KEY_XLSX_DIR, ""),
                 csv_path=saved.get(KEY_CSV_FILE, ""),
                 mem_recursive=bool(saved.get(KEY_MEM_RECURSIVE, False)),
                 csp_recursive=bool(saved.get(KEY_CSP_RECURSIVE, False)),
                 cmap_recursive=bool(saved.get(KEY_CMAP_RECURSIVE, False)),
+                xlsx_recursive=bool(saved.get(KEY_XLSX_RECURSIVE, False)),
             )
             errors = self.validate_paths()
             if errors:
@@ -3183,6 +3363,9 @@ class AppController:
             )
             summary["cmap_dir"] = "; ".join(
                 _as_path_list(saved.get(KEY_CMAP_DIR, ""))
+            )
+            summary["xlsx_dir"] = "; ".join(
+                _as_path_list(saved.get(KEY_XLSX_DIR, ""))
             )
             summary["csv_file"] = saved.get(KEY_CSV_FILE, "")
 
@@ -3276,6 +3459,12 @@ class AppController:
                 else:
                     summary["graphs_fell_back"] = True
 
+            # The saved choice for the individual pulses. A saved "on" with no
+            # usable Excel export draws the profiles from the .MEM values and
+            # names the graphs it could not decorate.
+            self.set_pulse_variability(self.get_pulse_variability_default())
+            summary["pulse_variability"] = self.get_pulse_variability()
+
             all_items: list = []
             _status("Generating header figure...")
             try:
@@ -3295,6 +3484,12 @@ class AppController:
                         entry.graph_type, entry.measure,
                         match_by=entry.match_by,
                     )
+                    overlay = self.get_last_pulse_overlay()
+                    if overlay is not None:
+                        summary[
+                            "pulse_overlay_drawn" if overlay["drawn"]
+                            else "pulse_overlay_missing"
+                        ].append(entry.label)
                     figs, _axes, plot_data = result[0], result[1], result[2]
                     figure_keys = (
                         plot_data.get("figure_keys")

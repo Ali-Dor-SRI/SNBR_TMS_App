@@ -116,6 +116,22 @@ def enlarge_axes_fonts(
                 text_obj.set_fontsize(text_obj.get_fontsize() * scale)
             if legend.get_title() is not None:
                 legend.get_title().set_fontsize(legend.get_title().get_fontsize() * scale)
+            # A legend the plot parked above the axes (the profile graphs'
+            # pulse legend) sits between the plot and the title, so the title
+            # pad set above has to grow by the block's now-enlarged height.
+            if getattr(legend, "_snbr_above_axes", False) and ax.title.get_text():
+                try:
+                    fig.canvas.draw()
+                    renderer = fig.canvas.get_renderer()
+                    block = legend.get_window_extent(renderer).height * 72.0 / fig.dpi
+                except Exception:
+                    block = 0.0
+                title = ax.title
+                ax.set_title(
+                    title.get_text(), fontsize=title.get_fontsize(),
+                    color=title.get_color(), fontweight=title.get_fontweight(),
+                    loc="center", pad=title_pad + block,
+                )
 
     # Figure-level text (suptitle, fig.text).
     for text_obj in fig.texts:

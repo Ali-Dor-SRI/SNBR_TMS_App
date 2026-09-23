@@ -5,7 +5,7 @@ from __future__ import annotations
 import customtkinter as ctk
 
 from core.user_settings import (
-    KEY_MEM_DIR, KEY_CSP_DIR, KEY_CMAP_DIR, KEY_CSV_FILE,
+    KEY_MEM_DIR, KEY_CSP_DIR, KEY_CMAP_DIR, KEY_CSV_FILE, KEY_XLSX_DIR,
     KEY_EXPORT_CSV, KEY_EXPORT_PDF, KEY_SYNC_PAIRS,
     KEY_REDCAP_DATA_DIR, KEY_REDCAP_DICT_DIR,
     KEY_REDCAP_TEMPLATE_DIR, KEY_REDCAP_EXPORT_DIR,
@@ -119,9 +119,10 @@ class SettingsPanel(ctk.CTkFrame):
 
         import_lines = [
             f"MEM Dir: {_fmt(defaults.get(KEY_MEM_DIR))}",
+            f"Qtrac Excel Exports Dir: {_fmt(defaults.get(KEY_XLSX_DIR))}",
             f"CSP Dir: {_fmt(defaults.get(KEY_CSP_DIR))}",
             f"CMAP Dir: {_fmt(defaults.get(KEY_CMAP_DIR))}",
-            f"CSV File: {_fmt(defaults.get(KEY_CSV_FILE))}",
+            f"Archive CSV (full data frame): {_fmt(defaults.get(KEY_CSV_FILE))}",
         ]
         row = add_summary_section(self._scroll, row, "Import Paths", import_lines)
 
@@ -158,6 +159,10 @@ class SettingsPanel(ctk.CTkFrame):
                 f"{i+1}. {entry.label}" for i, entry in enumerate(GRAPH_REGISTRY)
             ]
             graph_lines.append(f"Total: {len(GRAPH_REGISTRY)} graphs (all available)")
+        graph_lines.append(
+            "Individual pulses from the Qtrac Excel exports on the profile graphs: "
+            + ("on" if self._controller.get_pulse_variability_default() else "off")
+        )
         row = add_summary_section(self._scroll, row, "Graphs in Report", graph_lines)
 
         # Sync Pairs

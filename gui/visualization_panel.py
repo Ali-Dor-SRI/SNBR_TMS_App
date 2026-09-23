@@ -147,6 +147,11 @@ class VisualizationPanel(ctk.CTkFrame):
         self._check_widgets: dict[str, ctk.CTkCheckBox] = {}
         self._select_all_var = ctk.BooleanVar(value=False)
         self._save_default = ctk.BooleanVar(value=False)
+        # Whether the profile graphs draw the individual pulses from the Qtrac
+        # Excel exports. Saved with "Save as default"; the controller falls
+        # back to the .MEM values when no export matches.
+        self._pulse_var = ctk.BooleanVar(value=False)
+        self._pulse_note_var = ctk.StringVar(value="")
 
         # Cortex checkbox state
         self._cortex_vars: dict[str, ctk.BooleanVar] = {}
@@ -200,6 +205,30 @@ class VisualizationPanel(ctk.CTkFrame):
             text="Select graphs to include in the report, then browse with the arrows.",
             font=FONT_SUBTITLE, text_color=SUBTITLE_COLOR, anchor="w",
         ).pack(side="top", anchor="w", pady=(0, 4))
+
+        # The pulse-variability choice sits at the top, above the graph list,
+        # because it changes what every profile graph shows.
+        pulse_row = ctk.CTkFrame(title_frame, fg_color="transparent")
+        pulse_row.pack(side="top", anchor="w", fill="x", pady=(0, 2))
+        self._pulse_checkbox = ctk.CTkCheckBox(
+            pulse_row,
+            text=(
+                "Also show each recording's pulse-to-pulse variability: draw the "
+                "individual pulses from the Qtrac Excel export behind every "
+                "profile value"
+            ),
+            variable=self._pulse_var,
+            font=FONT_SMALL,
+            command=self._on_pulse_toggled,
+        )
+        self._pulse_checkbox.pack(side="left", anchor="w")
+        self._pulse_note = ctk.CTkLabel(
+            title_frame,
+            textvariable=self._pulse_note_var,
+            font=FONT_SMALL, text_color="#F39C12", anchor="w",
+            wraplength=900, justify="left",
+        )
+        self._pulse_note.pack(side="top", anchor="w", pady=(0, 2))
 
         # ── Left sidebar ──────────────────────────────────
         sidebar = ctk.CTkScrollableFrame(self, width=240, corner_radius=CORNER_RADIUS)
@@ -392,9 +421,34 @@ class VisualizationPanel(ctk.CTkFrame):
         self._update_nav_buttons()
         self._reset_highlights()
         self._bind_arrow_keys()
+        # Before any figure is drawn: the saved pulse-variability choice, and a
+        # note when there is no Excel folder to honour it with.
+        self._pulse_var.set(self._controller.get_pulse_variability_default())
+        self._sync_pulse_choice()
         self._populate_cortex_checkboxes()
         self._update_checkbox_availability()
         self._apply_saved_graph_selection()
+
+    # ── Pulse variability (individual pulses from the Excel exports) ──
+
+    def _sync_pulse_choice(self):
+        """Push the tick box to the controller and refresh the note under it."""
+        enabled = bool(self._pulse_var.get())
+        self._controller.set_pulse_variability(enabled)
+        note = self._controller.pulse_overlay_note() if enabled else ""
+        self._pulse_note_var.set(note)
+
+    def _on_pulse_toggled(self):
+        """The user changed the choice: redraw what is on screen without it, or with it."""
+        self._sync_pulse_choice()
+        self._clear_cache()
+        self._rebuild_nav_list()
+        if self._nav_list:
+            self._nav_index = min(self._nav_index, len(self._nav_list) - 1)
+            self._show_current()
+        else:
+            self._display_placeholder()
+        self._update_nav_buttons()
 
     def _apply_saved_graph_selection(self):
         """Tick the saved graphs, minus any this participant has no data for.
@@ -952,6 +1006,9 @@ class VisualizationPanel(ctk.CTkFrame):
         # participant says nothing about that preference.
         if self._save_default.get():
             self._controller.save_selected_graphs_default(checked)
+            # The same tick also records whether the profiles carry the
+            # individual pulses, so Quick Start reproduces this page.
+            self._controller.save_pulse_variability_default(self._pulse_var.get())
 
         # Find checked graphs that haven't been generated yet.
         missing = [

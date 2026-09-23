@@ -34,6 +34,26 @@ def graph_summary_lines(s: dict) -> list[str]:
         lines.append(
             "None of the saved graphs applied — used every available graph."
         )
+    # The individual pulses are a saved choice that can only be honoured when
+    # the recording's Excel export is found, so say which profiles got them
+    # and which were drawn from the .MEM values instead.
+    if s.get("pulse_variability"):
+        drawn = s.get("pulse_overlay_drawn") or []
+        missing = s.get("pulse_overlay_missing") or []
+        if drawn:
+            lines.append(
+                "Individual pulses from the Excel exports drawn on: "
+                + ", ".join(drawn)
+            )
+        if missing:
+            lines.append(
+                "No matching Excel export, drawn from the .MEM values only: "
+                + ", ".join(missing)
+            )
+        if not drawn and not missing:
+            lines.append(
+                "Individual pulses were requested, but no profile graph was in the report."
+            )
     return lines
 
 
@@ -240,6 +260,8 @@ class WelcomePanel(ctk.CTkFrame):
             path_lines.append(f"MEM Dir: {s['mem_dir']}")
         if s["csp_dir"]:
             path_lines.append(f"CSP Dir: {s['csp_dir']}")
+        if s.get("xlsx_dir"):
+            path_lines.append(f"Qtrac Excel Exports Dir: {s['xlsx_dir']}")
         if s["csv_file"]:
             path_lines.append(f"CSV Source: {s['csv_file']}")
         if s["csv_export"]:

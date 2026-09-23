@@ -2133,6 +2133,20 @@ def plot_participant_tsici_visit_profiles(
     return figure, axes, plot_data
 
 
+def legend_height_points(figure, legend) -> float:
+    """Height of a drawn legend in points, so a title can be placed above it.
+
+    Zero when the canvas cannot be drawn yet (no renderer), which leaves the
+    title at its default pad rather than failing the plot.
+    """
+    try:
+        figure.canvas.draw()
+        renderer = figure.canvas.get_renderer()
+        return legend.get_window_extent(renderer).height * 72.0 / figure.dpi
+    except Exception:
+        return 0.0
+
+
 def plot_measure_profile(
     measure="t_sici",
     participant_id=None,
@@ -2143,8 +2157,17 @@ def plot_measure_profile(
     y_label: str = None,
     title: str = None,
     show: bool = True,
+    pulse_readings: dict | None = None,
 ):
-    """Plot one clean waveform profile for the requested measure."""
+    """Plot one clean waveform profile for the requested measure.
+
+    *pulse_readings*, when given, maps a Qtrac acquisition token to the
+    readings of that recording's per-stimulus Excel export (see
+    :func:`parser.xlsx_parser.extract_pulse_readings`). Each plotted row whose
+    ``source_file`` carries a matching token then gets its individual pulses
+    drawn behind the profile (see :mod:`processing.pulse_overlay`); rows with
+    no match are drawn exactly as before.
+    """
     try:
         import matplotlib
         if not show:
@@ -2190,6 +2213,7 @@ def plot_measure_profile(
         if len(_cortex_vals) > 1:
             _use_cortex_legend = True
 
+    plotted_series: list[tuple[dict, pd.DataFrame, str]] = []
     for index, row_dict in enumerate(matched_rows.to_dict(orient="records"), start=0):
         long_df = waveform_long_format(pd.Series(row_dict), measure=measure)
         if long_df.empty:
@@ -2200,6 +2224,7 @@ def plot_measure_profile(
             series_color, _ = cortex_color(raw_cx, index)
         else:
             series_color = color_cycle[index % len(color_cycle)]
+        plotted_series.append((row_dict, long_df, series_color))
         global_values.extend(long_df["value"].tolist())
         axis.plot(
             long_df["isi_ms"],
@@ -2242,6 +2267,37 @@ def plot_measure_profile(
             f"Participant ID {int(participant_id)} has no available {config['label']} values to plot on {normalized_date}."
         )
 
+    # The individual pulses behind each value, for the rows whose Excel export
+    # was found. Drawn before the y-limits are chosen so the dots fit.
+    overlay_handles: list = []
+    overlay_notes: list[str] = []
+    if pulse_readings:
+        from parser.xlsx_parser import readings_for_source_file
+        from processing.pulse_overlay import (
+            draw_pulse_overlay, overlay_legend_handles, overlay_note,
+        )
+
+        measure_key = normalize_measure_key(measure)
+        for row_dict, long_df, series_color in plotted_series:
+            readings = readings_for_source_file(pulse_readings, row_dict.get("source_file"))
+            block = (readings or {}).get("measures", {}).get(measure_key) if readings else None
+            if not block:
+                continue
+            points = dict(zip(long_df["isi_ms"].tolist(), long_df["value"].tolist()))
+            drawn = draw_pulse_overlay(
+                axis, points, block, color=series_color, measure=measure_key,
+            )
+            if not drawn:
+                continue
+            global_values.extend(drawn)
+            if not overlay_handles:
+                overlay_handles = overlay_legend_handles(
+                    measure_key, config["label"], series_color, block,
+                )
+            overlay_notes.append(overlay_note(
+                measure_key, block, Path(str(readings.get("path", ""))).name or None,
+            ))
+
     y_min = min(global_values)
     y_max = max(global_values)
 
@@ -2274,7 +2330,29 @@ def plot_measure_profile(
     axis.spines["bottom"].set_linewidth(1.1)
     axis.tick_params(axis="both", colors="#4C5B70", labelsize=11)
 
-    if len(matched_rows) > 1:
+    if overlay_handles:
+        handles, _labels = axis.get_legend_handles_labels()
+        # One block *above* the axes, between the plot and the title: the trace
+        # entries (when several rows are drawn), the pulse entries, and the
+        # provenance note as its title. Outside the plot area on purpose -- a
+        # legend inside it needs headroom that distorts the y-axis. Fonts are
+        # small because the app enlarges every font by 1.5x later, and that
+        # pass reads the flag below to lift the title clear of the block.
+        legend = axis.legend(
+            handles=list(handles) + overlay_handles, frameon=False,
+            loc="lower left", bbox_to_anchor=(0.0, 1.0), borderaxespad=0.3,
+            fontsize=7, title="\n".join(overlay_notes) or None, title_fontsize=6.5,
+        )
+        legend.get_title().set_color("#68778C")
+        legend._snbr_above_axes = True
+        try:
+            legend.set_alignment("left")
+        except AttributeError:  # matplotlib < 3.6
+            pass
+        axis.set_title(
+            resolved_title, fontsize=14, pad=14 + legend_height_points(figure, legend),
+        )
+    elif len(matched_rows) > 1:
         legend_title = "Stimulated cortex" if _use_cortex_legend else "MEM file"
         axis.legend(frameon=False, loc="best", fontsize=9, title=legend_title)
 

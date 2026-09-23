@@ -7,6 +7,7 @@ from pathlib import Path
 from core.user_settings import (
     save_defaults, KEY_MEM_DIR, KEY_CSP_DIR, KEY_CMAP_DIR, KEY_CSV_FILE,
     KEY_MEM_RECURSIVE, KEY_CSP_RECURSIVE, KEY_CMAP_RECURSIVE,
+    KEY_XLSX_DIR, KEY_XLSX_RECURSIVE,
 )
 from gui.theme import (
     FONT_TITLE, FONT_HEADING, FONT_BODY, FONT_SMALL, FONT_SUBTITLE, FONT_BUTTON,
@@ -31,6 +32,7 @@ class FilePanel(ctk.CTkFrame):
         self._error_var = ctk.StringVar()
 
         self._save_mem = ctk.BooleanVar(value=False)
+        self._save_xlsx = ctk.BooleanVar(value=False)
         self._save_csp = ctk.BooleanVar(value=False)
         self._save_cmap = ctk.BooleanVar(value=False)
         self._save_csv = ctk.BooleanVar(value=False)
@@ -38,12 +40,13 @@ class FilePanel(ctk.CTkFrame):
         # Each multi-folder field keeps its own list of {frame, var} rows
         # and the container frame those rows are gridded into.
         self._dir_rows: dict[str, list[dict]] = {
-            "mem": [], "csp": [], "cmap": [],
+            "mem": [], "xlsx": [], "csp": [], "cmap": [],
         }
         self._dir_lists: dict[str, ctk.CTkFrame] = {}
         # Per-field "scan subfolders" toggle vars + warning labels.
         self._recursive_vars: dict[str, ctk.BooleanVar] = {
             "mem": ctk.BooleanVar(value=False),
+            "xlsx": ctk.BooleanVar(value=False),
             "csp": ctk.BooleanVar(value=False),
             "cmap": ctk.BooleanVar(value=False),
         }
@@ -56,10 +59,11 @@ class FilePanel(ctk.CTkFrame):
         """Pre-fill entries from controller defaults."""
         paths = self._controller.get_paths()
         self._set_dir_paths("mem", paths["mem_path"])
+        self._set_dir_paths("xlsx", paths.get("xlsx_path", []))
         self._set_dir_paths("csp", paths["csp_path"])
         self._set_dir_paths("cmap", paths.get("cmap_path", []))
         self._csv_var.set(paths["csv_path"])
-        for name in ("mem", "csp", "cmap"):
+        for name in ("mem", "xlsx", "csp", "cmap"):
             self._recursive_vars[name].set(
                 bool(paths.get(f"{name}_recursive", False))
             )
@@ -113,8 +117,23 @@ class FilePanel(ctk.CTkFrame):
             ),
             save_var=self._save_mem,
         )
+        # Directly under the MEM folders: the per-stimulus Excel exports are
+        # the same recordings, one workbook per .MEM, matched by the Qtrac
+        # token in the file name. Purely optional -- they only add the
+        # individual pulses behind the profile graphs.
         self._build_dir_section(
-            fields, row=1, name="csp",
+            fields, row=1, name="xlsx",
+            title="Qtrac Excel Exports Directories",
+            helper=(
+                "Folders containing the per-stimulus .xlsx exports from "
+                "QtracP (one per recording). Used to draw the individual "
+                "pulses behind the profile graphs; CSP waveform workbooks in "
+                "the same folders are ignored. (Optional)"
+            ),
+            save_var=self._save_xlsx,
+        )
+        self._build_dir_section(
+            fields, row=2, name="csp",
             title="CSP MEM Files Directories",
             helper=(
                 "Folders containing CSP-specific .MEM files. Add as many as "
@@ -123,7 +142,7 @@ class FilePanel(ctk.CTkFrame):
             save_var=self._save_csp,
         )
         self._build_dir_section(
-            fields, row=2, name="cmap",
+            fields, row=3, name="cmap",
             title="CMAP Files Directories",
             helper=(
                 "Folders containing motor nerve-conduction study .pdf or "
@@ -132,9 +151,12 @@ class FilePanel(ctk.CTkFrame):
             save_var=self._save_cmap,
         )
         self._add_path_row(
-            fields, row=3,
-            label="Archive CSV File",
-            helper="Select a .csv archive file to build on. (Optional)",
+            fields, row=4,
+            label="Archive CSV (full data frame)",
+            helper=(
+                "The .csv data frame this app exported on a previous run, to "
+                "build on instead of re-parsing everything. (Optional)"
+            ),
             var=self._csv_var,
             browse_file=True,
             save_var=self._save_csv,
@@ -429,19 +451,23 @@ class FilePanel(ctk.CTkFrame):
         self._error_var.set("")
 
         mem_paths = self._collect_dir_paths("mem")
+        xlsx_paths = self._collect_dir_paths("xlsx")
         csp_paths = self._collect_dir_paths("csp")
         cmap_paths = self._collect_dir_paths("cmap")
         mem_rec = self._recursive_vars["mem"].get()
+        xlsx_rec = self._recursive_vars["xlsx"].get()
         csp_rec = self._recursive_vars["csp"].get()
         cmap_rec = self._recursive_vars["cmap"].get()
         self._controller.set_paths(
             mem_path=mem_paths,
             csp_path=csp_paths,
             cmap_path=cmap_paths,
+            xlsx_path=xlsx_paths,
             csv_path=self._csv_var.get().strip(),
             mem_recursive=mem_rec,
             csp_recursive=csp_rec,
             cmap_recursive=cmap_rec,
+            xlsx_recursive=xlsx_rec,
         )
 
         errors = self._controller.validate_paths()
@@ -456,6 +482,9 @@ class FilePanel(ctk.CTkFrame):
         if self._save_mem.get():
             to_save[KEY_MEM_DIR] = mem_paths
             to_save[KEY_MEM_RECURSIVE] = mem_rec
+        if self._save_xlsx.get():
+            to_save[KEY_XLSX_DIR] = xlsx_paths
+            to_save[KEY_XLSX_RECURSIVE] = xlsx_rec
         if self._save_csp.get():
             to_save[KEY_CSP_DIR] = csp_paths
             to_save[KEY_CSP_RECURSIVE] = csp_rec
