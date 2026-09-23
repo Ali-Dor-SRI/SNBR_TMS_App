@@ -74,6 +74,42 @@ KEY_OUTLIER_BOUNDS = "outlier_bounds"
 # strings, e.g. ["exclusion"]. Skipped pages stay reachable from the toolbar
 # page-jump dropdown.
 KEY_SKIPPED_PAGES = "skipped_pages"
+# Which Data Import mode Quick Start (and Complete All) should use. Stored as
+# one of the DATA_MODE_* slugs below rather than the page's radio value, which
+# is a UI detail. Unset means "keep the historical behaviour": load the archive
+# .csv, re-parsing instead when its schema is out of date.
+KEY_DATA_MODE = "data_mode"
+DATA_MODE_ARCHIVE_AS_IS = "archive_as_is"
+DATA_MODE_ARCHIVE_PLUS_NEW = "archive_plus_new"
+DATA_MODE_FULL_PARSE = "full_parse"
+DATA_MODES = (
+    DATA_MODE_ARCHIVE_AS_IS,
+    DATA_MODE_ARCHIVE_PLUS_NEW,
+    DATA_MODE_FULL_PARSE,
+)
+
+# Optional Quick Start steps the user has turned off, as a list of the STEP_*
+# slugs below. A step is turned off by ticking its "save as default" control
+# with the path field left empty: there is no folder to write to, so the step
+# has nothing to do. Only these five are optional — the rest build the report.
+KEY_SKIPPED_STEPS = "skipped_quick_start_steps"
+STEP_EXPORT_CSV = "export_csv"
+STEP_EXPORT_PDF = "export_pdf"
+STEP_EMAIL = "email"
+STEP_REDCAP = "redcap"
+STEP_SYNC = "sync"
+QUICK_START_STEPS = (
+    STEP_EXPORT_CSV,
+    STEP_EXPORT_PDF,
+    STEP_EMAIL,
+    STEP_REDCAP,
+    STEP_SYNC,
+)
+
+# Graphs Quick Start puts in the report, as a list of GRAPH_REGISTRY keys.
+# Unset means "every graph the participant has data for", the original rule.
+KEY_SELECTED_GRAPHS = "selected_graphs"
+
 KEY_REDCAP_DATA_DIR = "redcap_data_dir"
 KEY_REDCAP_DICT_DIR = "redcap_dict_dir"
 KEY_REDCAP_TEMPLATE_DIR = "redcap_template_dir"
@@ -135,6 +171,9 @@ def load_defaults() -> dict[str, str]:
         KEY_EXCLUDED_PARTICIPANTS: raw.get(KEY_EXCLUDED_PARTICIPANTS, []),
         KEY_OUTLIER_BOUNDS: raw.get(KEY_OUTLIER_BOUNDS, {}),
         KEY_SKIPPED_PAGES: raw.get(KEY_SKIPPED_PAGES, []),
+        KEY_DATA_MODE: raw.get(KEY_DATA_MODE, ""),
+        KEY_SELECTED_GRAPHS: raw.get(KEY_SELECTED_GRAPHS, []),
+        KEY_SKIPPED_STEPS: raw.get(KEY_SKIPPED_STEPS, []),
         KEY_REDCAP_DATA_DIR: raw.get(KEY_REDCAP_DATA_DIR, ""),
         KEY_REDCAP_DICT_DIR: raw.get(KEY_REDCAP_DICT_DIR, ""),
         KEY_REDCAP_TEMPLATE_DIR: raw.get(KEY_REDCAP_TEMPLATE_DIR, ""),

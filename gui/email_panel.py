@@ -7,6 +7,7 @@ from pathlib import Path
 
 import customtkinter as ctk
 
+from core.user_settings import STEP_EMAIL
 from gui.theme import (
     FONT_TITLE, FONT_HEADING, FONT_BODY, FONT_SMALL, FONT_SUBTITLE, FONT_BUTTON,
     ACCENT_COLOR, ACCENT_HOVER, ERROR_COLOR, SUCCESS_COLOR, DISABLED_FG, SUBTITLE_COLOR,
@@ -219,6 +220,12 @@ class EmailPanel(ctk.CTkFrame):
                 "(no report figures available — visit the Visualization page first)",
             )
         self._update_security_note()
+        if self._controller.is_step_skipped(STEP_EMAIL):
+            self._set_status(
+                "Quick Start currently skips the email step. Save defaults "
+                "with a recipient to put it back.",
+                "#F39C12",
+            )
 
     def _update_security_note(self):
         from emailing.credentials import keyring_backend_name
@@ -277,8 +284,22 @@ class EmailPanel(ctk.CTkFrame):
                 f"Save failed — {type(e).__name__}: {e}", ERROR_COLOR,
             )
             return
+        # No recipient means there is nobody to send to, so an automated run
+        # has nothing to do — record that rather than failing every Quick Start
+        # on a missing address. Saving a recipient puts the step back.
+        turning_off = not f["to"].strip()
+        self._controller.set_step_skipped(STEP_EMAIL, turning_off)
+
         self._update_security_note()
         from emailing.credentials import keyring_backend_name
+        if turning_off:
+            self._set_status(
+                "Defaults saved with no recipient — Quick Start will skip the "
+                "email step from now on. Save again with a recipient to put "
+                "it back.",
+                "#F39C12",
+            )
+            return
         msg = "Defaults saved."
         if f["remember_password"]:
             msg += f" Password stored in {keyring_backend_name()}."

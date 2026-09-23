@@ -9,7 +9,10 @@ from tkinter import filedialog
 
 import customtkinter as ctk
 
-from core.user_settings import save_defaults, KEY_EXPORT_CSV, KEY_EXPORT_PDF
+from core.user_settings import (
+    save_defaults, KEY_EXPORT_CSV, KEY_EXPORT_PDF,
+    STEP_EXPORT_CSV, STEP_EXPORT_PDF,
+)
 from gui.theme import (
     FONT_TITLE, FONT_HEADING, FONT_BODY, FONT_SMALL, FONT_SUBTITLE, FONT_BUTTON,
     ACCENT_COLOR, ACCENT_HOVER, ERROR_COLOR, SUCCESS_COLOR, DISABLED_FG, SUBTITLE_COLOR,
@@ -52,6 +55,11 @@ class ExportPanel(ctk.CTkFrame):
         self._csv_name.trace_add("write", self._auto_check_csv)
         self._pdf_dir.trace_add("write", self._auto_check_pdf)
         self._pdf_name.trace_add("write", self._auto_check_pdf)
+
+        # Ticking "save as default" on a row with no folder turns that export
+        # off for Quick Start, which is worth saying before Next records it.
+        self._save_csv_default.trace_add("write", self._skip_hint)
+        self._save_pdf_default.trace_add("write", self._skip_hint)
 
     # ── UI ─────────────────────────────────────────────────
 
@@ -150,7 +158,7 @@ class ExportPanel(ctk.CTkFrame):
             nav, text="Next", width=100, height=BUTTON_HEIGHT,
             corner_radius=CORNER_RADIUS, font=FONT_BUTTON,
             fg_color=ACCENT_COLOR, hover_color=ACCENT_HOVER,
-            command=self._on_next,
+            command=self._handle_next,
         )
         self._next_btn.grid(row=0, column=2, sticky="e")
 
@@ -228,6 +236,71 @@ class ExportPanel(ctk.CTkFrame):
     def _browse_pdf(self):
         self._browse_folder_into(self._pdf_dir, "Choose a folder for the report")
 
+    # ── Turning an export off ──────────────────────────────
+
+    def _step_rows(self):
+        """(step, label, requested, folder, save-as-default) per export type."""
+        return (
+            (STEP_EXPORT_CSV, "CSV export",
+             self._csv_check, self._csv_dir, self._save_csv_default),
+            (STEP_EXPORT_PDF, "PDF report",
+             self._pdf_check, self._pdf_dir, self._save_pdf_default),
+        )
+
+    @staticmethod
+    def _wants_export(requested, folder) -> bool:
+        """Whether this row asks for an export at all.
+
+        A folder the user typed, or a ticked export, both mean yes. Saving an
+        empty folder for an export that was not requested is the only way to
+        say "there is no folder because I do not want this one".
+        """
+        return bool(requested.get() or folder.get().strip())
+
+    def _handle_next(self):
+        """Record which exports Quick Start should stop doing, then advance."""
+        for step, _label, requested, folder, save in self._step_rows():
+            if not save.get():
+                continue  # unticked never changes a saved default
+            self._controller.set_step_skipped(
+                step, not self._wants_export(requested, folder),
+            )
+        self._on_next()
+
+    def _skip_hint(self, *_args):
+        """Say what ticking 'save as default' on an empty row will do."""
+        turning_off = [
+            label for _step, label, requested, folder, save in self._step_rows()
+            if save.get() and not self._wants_export(requested, folder)
+        ]
+        if turning_off:
+            self._status_var.set(
+                f"{' and '.join(turning_off)} will be skipped by Quick Start "
+                "from now on — no folder was given. Fill a folder in (or tick "
+                "the export) to put it back."
+            )
+            self._status_label.configure(text_color="#F39C12")
+            self._showing_skip_hint = True
+        elif getattr(self, "_showing_skip_hint", False):
+            # The user changed their mind before pressing Next; don't leave a
+            # warning standing that no longer describes what will happen.
+            notice = self._skipped_notice()
+            self._status_var.set(notice)
+            self._status_label.configure(
+                text_color="#F39C12" if notice else DISABLED_FG,
+            )
+            self._showing_skip_hint = False
+
+    def _skipped_notice(self) -> str:
+        """What Quick Start is currently skipping, for the page's status line."""
+        off = [
+            label for step, label, *_rest in self._step_rows()
+            if self._controller.is_step_skipped(step)
+        ]
+        if not off:
+            return ""
+        return f"Quick Start currently skips: {', '.join(off)}."
+
     # ── Auto-check ─────────────────────────────────────────
 
     # Filling in either box still ticks the export. Clearing them does not
@@ -275,8 +348,11 @@ class ExportPanel(ctk.CTkFrame):
         self._pdf_name.set("")
         self._save_csv_default.set(False)
         self._save_pdf_default.set(False)
-        self._status_var.set("")
-        self._status_label.configure(text_color=DISABLED_FG)
+        notice = self._skipped_notice()
+        self._status_var.set(notice)
+        self._status_label.configure(
+            text_color="#F39C12" if notice else DISABLED_FG,
+        )
 
         msg = self._controller.consume_quick_start_message()
         if msg:

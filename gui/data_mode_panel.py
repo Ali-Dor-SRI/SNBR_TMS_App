@@ -5,6 +5,9 @@ import traceback
 
 import customtkinter as ctk
 
+from core.user_settings import (
+    DATA_MODE_ARCHIVE_AS_IS, DATA_MODE_ARCHIVE_PLUS_NEW, DATA_MODE_FULL_PARSE,
+)
 from gui.theme import (
     FONT_TITLE, FONT_HEADING, FONT_SMALL, FONT_SUBTITLE, FONT_BUTTON,
     ACCENT_COLOR, ACCENT_HOVER, ERROR_COLOR, SUCCESS_COLOR, DISABLED_FG, SUBTITLE_COLOR,
@@ -18,6 +21,14 @@ MODE_PARSE_MEM = 2
 # Fast path: load the chosen archive CSV as-is — no MEM-folder scan, no CMAP
 # merge. Requires a CSV to have been selected on the Import Settings page.
 MODE_EXISTING_CSV_FAST = 3
+
+# The radio values above are a UI detail; the saved default is a stable slug.
+_MODE_TO_SLUG = {
+    MODE_EXISTING_CSV_FAST: DATA_MODE_ARCHIVE_AS_IS,
+    MODE_EXISTING_CSV: DATA_MODE_ARCHIVE_PLUS_NEW,
+    MODE_PARSE_MEM: DATA_MODE_FULL_PARSE,
+}
+_SLUG_TO_MODE = {slug: mode for mode, slug in _MODE_TO_SLUG.items()}
 
 
 def _id_mismatch_warning(attrs: dict) -> list[str]:
@@ -83,6 +94,7 @@ class DataModePanel(ctk.CTkFrame):
         self._on_back = on_back
 
         self._mode_var = ctk.IntVar(value=0)
+        self._save_default = ctk.BooleanVar(value=False)
         self._status_var = ctk.StringVar()
         self._info_var = ctk.StringVar()
 
@@ -178,6 +190,13 @@ class DataModePanel(ctk.CTkFrame):
             anchor="w",
         ).grid(row=6, column=0, sticky="w", padx=(26, 0), pady=(0, SECTION_PAD_Y))
 
+        # Ticking this stores the selected option for Quick Start; leaving it
+        # unticked never clears a previously saved one (as on every other page).
+        ctk.CTkCheckBox(
+            options, text="Save as default", variable=self._save_default,
+            font=FONT_SMALL,
+        ).grid(row=7, column=0, sticky="e", pady=(0, PAD_Y))
+
         # Progress bar (hidden until import starts)
         self._progress = ctk.CTkProgressBar(
             self._footer, mode="indeterminate", width=400,
@@ -226,6 +245,7 @@ class DataModePanel(ctk.CTkFrame):
         """Called each time this page is raised — sync radio state with paths."""
         csv_path = self._controller.get_paths()["csv_path"]
         has_csv = bool(csv_path)
+        saved_mode = self._controller.get_data_mode_default()
 
         if has_csv:
             self._radio_fast.configure(state="normal")
@@ -243,8 +263,10 @@ class DataModePanel(ctk.CTkFrame):
                     f"CSP-only follow-ups).\n({csv_path})"
                 ),
             )
-            # Default to the fast path when an archive is available.
-            self._mode_var.set(MODE_EXISTING_CSV_FAST)
+            # Open on the saved default, else the fast path.
+            self._mode_var.set(
+                _SLUG_TO_MODE.get(saved_mode, MODE_EXISTING_CSV_FAST)
+            )
         else:
             self._radio_fast.configure(state="disabled")
             self._fast_desc.configure(
@@ -254,6 +276,7 @@ class DataModePanel(ctk.CTkFrame):
             self._csv_desc.configure(
                 text="No CSV archive was selected on the previous page.",
             )
+            # Both archive modes need a CSV, so a saved one is unusable here.
             self._mode_var.set(MODE_PARSE_MEM)
 
         # Clear any previous status
@@ -272,6 +295,12 @@ class DataModePanel(ctk.CTkFrame):
             self._status_var.set("Please select an option above.")
             self._status_label.configure(text_color=ERROR_COLOR)
             return
+
+        # Saved on the choice, not on the load succeeding — the user ticked the
+        # box to record which option they want, and a failed import (bad folder,
+        # unreadable archive) says nothing about that preference.
+        if self._save_default.get():
+            self._controller.save_data_mode_default(_MODE_TO_SLUG[mode])
 
         self._set_busy(True)
         self._status_var.set("Loading data...")

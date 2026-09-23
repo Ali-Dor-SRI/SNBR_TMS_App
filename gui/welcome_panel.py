@@ -16,6 +16,27 @@ from gui.page_shell import resolve_footer
 from gui.widgets import add_summary_section
 
 
+def graph_summary_lines(s: dict) -> list[str]:
+    """The Graphs section of the Quick Start summary.
+
+    A saved graph the participant has no data for is dropped rather than
+    failing the run, so the skipped ones are named — otherwise the report is
+    silently shorter than the saved selection and nothing says why.
+    """
+    lines = [f"{i+1}. {g}" for i, g in enumerate(s["graphs"])]
+    lines.append(f"Total figures: {s['figure_count']}")
+    if s.get("graphs_skipped"):
+        lines.append(
+            "Skipped (no data for this participant): "
+            + ", ".join(s["graphs_skipped"])
+        )
+    if s.get("graphs_fell_back"):
+        lines.append(
+            "None of the saved graphs applied — used every available graph."
+        )
+    return lines
+
+
 class WelcomePanel(ctk.CTkFrame):
     """Welcome page — choose Quick Start (fully automatic) or Custom Workflow."""
 
@@ -228,8 +249,7 @@ class WelcomePanel(ctk.CTkFrame):
         row = add_summary_section(scroll, row, "Paths", path_lines)
 
         # Graphs
-        graph_lines = [f"{i+1}. {g}" for i, g in enumerate(s["graphs"])]
-        graph_lines.append(f"Total figures: {s['figure_count']}")
+        graph_lines = graph_summary_lines(s)
         row = add_summary_section(scroll, row, "Graphs in Report", graph_lines)
 
         # REDCap Export
@@ -272,6 +292,13 @@ class WelcomePanel(ctk.CTkFrame):
         else:
             sync_lines.append("No sync pairs configured.")
         row = add_summary_section(scroll, row, "Backup & Sync", sync_lines)
+
+        # Steps the user turned off. Listed so a missing output reads as a
+        # setting rather than as a failure.
+        if s.get("skipped_steps"):
+            row = add_summary_section(
+                scroll, row, "Skipped by Choice", list(s["skipped_steps"]),
+            )
 
         # OK button
         ctk.CTkButton(

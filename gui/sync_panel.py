@@ -8,6 +8,7 @@ from tkinter import filedialog
 import customtkinter as ctk
 
 from back_up_sync.file_sync import SyncPair, sync_pairs
+from core.user_settings import STEP_SYNC
 from gui.theme import (
     FONT_TITLE, FONT_HEADING, FONT_BODY, FONT_SMALL, FONT_SUBTITLE, FONT_BUTTON,
     ACCENT_COLOR, ACCENT_HOVER, ERROR_COLOR, SUCCESS_COLOR, DISABLED_FG, SUBTITLE_COLOR,
@@ -144,7 +145,7 @@ class SyncPanel(ctk.CTkFrame):
             nav, text="Next", width=100, height=BUTTON_HEIGHT,
             corner_radius=CORNER_RADIUS, font=FONT_BUTTON,
             fg_color=ACCENT_COLOR, hover_color=ACCENT_HOVER,
-            command=self._on_next,
+            command=self._handle_next,
         )
         self._next_btn.grid(row=0, column=3, sticky="e")
 
@@ -257,8 +258,30 @@ class SyncPanel(ctk.CTkFrame):
                 pairs_data.append({"source": src, "destination": dst})
         self._controller.save_sync_defaults(pairs_data)
 
+    def _complete_pairs(self) -> int:
+        """How many rows name both a source and a destination."""
+        return sum(
+            1 for row in self._pair_rows
+            if row["src_var"].get().strip() and row["dst_var"].get().strip()
+        )
+
+    def _handle_next(self):
+        """Record whether Quick Start should still sync, then advance."""
+        if self._save_default_var.get():
+            # Saving with no usable pair is the user saying there is nothing to
+            # copy — the step has no work and should stop running.
+            self._controller.set_step_skipped(STEP_SYNC, not self._complete_pairs())
+        self._on_next()
+
     def _on_save_default_toggled(self):
         """Save all pairs immediately when the checkbox is checked."""
+        if self._save_default_var.get() and not self._complete_pairs():
+            self._status_var.set(
+                "No source/destination pair given — Quick Start will skip "
+                "Backup & Sync from now on. Add a pair and tick this again "
+                "to put it back."
+            )
+            self._status_label.configure(text_color="#F39C12")
         if self._save_default_var.get():
             self._save_all_pairs()
 
@@ -283,10 +306,18 @@ class SyncPanel(ctk.CTkFrame):
             self._add_pair_row()
 
         self._save_default_var.set(False)
-        self._status_var.set("")
         self._current_file_var.set("")
         self._progress_var.set(0.0)
-        self._status_label.configure(text_color=DISABLED_FG)
+        if self._controller.is_step_skipped(STEP_SYNC):
+            self._status_var.set(
+                "Quick Start currently skips Backup & Sync. Add a "
+                "source/destination pair and tick 'Save as default' to put "
+                "it back."
+            )
+            self._status_label.configure(text_color="#F39C12")
+        else:
+            self._status_var.set("")
+            self._status_label.configure(text_color=DISABLED_FG)
 
         msg = self._controller.consume_quick_start_message()
         if msg:

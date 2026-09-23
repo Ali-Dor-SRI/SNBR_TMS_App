@@ -100,6 +100,17 @@ class SettingsPanel(ctk.CTkFrame):
             "Both hemispheres when available",
         ])
 
+        # Data Import
+        row = add_summary_section(self._scroll, row, "Data Import", [
+            self._controller.get_data_mode_label(),
+        ])
+
+        # Steps Quick Start no longer runs
+        skipped = self._controller.skipped_step_labels()
+        row = add_summary_section(self._scroll, row, "Skipped in Quick Start", (
+            skipped or ["Nothing skipped — every optional step runs."]
+        ))
+
         # Import Paths
         def _fmt(value):
             if isinstance(value, (list, tuple)):
@@ -132,8 +143,21 @@ class SettingsPanel(ctk.CTkFrame):
 
         # Graphs
         from gui.visualization_panel import GRAPH_REGISTRY
-        graph_lines = [f"{i+1}. {entry.label}" for i, entry in enumerate(GRAPH_REGISTRY)]
-        graph_lines.append(f"Total: {len(GRAPH_REGISTRY)} graphs (all available)")
+        saved_graphs = self._controller.get_selected_graphs_default()
+        if saved_graphs:
+            labels = {entry.key: entry.label for entry in GRAPH_REGISTRY}
+            graph_lines = [
+                f"{i+1}. {labels[key]}" for i, key in enumerate(saved_graphs)
+            ]
+            graph_lines.append(
+                f"Total: {len(saved_graphs)} graphs (saved selection; any the "
+                "participant has no data for are skipped)"
+            )
+        else:
+            graph_lines = [
+                f"{i+1}. {entry.label}" for i, entry in enumerate(GRAPH_REGISTRY)
+            ]
+            graph_lines.append(f"Total: {len(GRAPH_REGISTRY)} graphs (all available)")
         row = add_summary_section(self._scroll, row, "Graphs in Report", graph_lines)
 
         # Sync Pairs

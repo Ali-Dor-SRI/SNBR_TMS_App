@@ -146,6 +146,7 @@ class VisualizationPanel(ctk.CTkFrame):
         self._check_vars: dict[str, ctk.BooleanVar] = {}
         self._check_widgets: dict[str, ctk.CTkCheckBox] = {}
         self._select_all_var = ctk.BooleanVar(value=False)
+        self._save_default = ctk.BooleanVar(value=False)
 
         # Cortex checkbox state
         self._cortex_vars: dict[str, ctk.BooleanVar] = {}
@@ -223,7 +224,19 @@ class VisualizationPanel(ctk.CTkFrame):
             font=FONT_BUTTON,
             command=self._on_select_all,
         )
-        sa_cb.grid(row=sidebar_row, column=0, sticky="w", pady=(0, SECTION_PAD_Y))
+        sa_cb.grid(row=sidebar_row, column=0, sticky="w", pady=(0, 2))
+        sidebar_row += 1
+
+        # Above the graph list rather than below it: the list runs to 40+ rows,
+        # and a control the user is meant to notice must not need scrolling to.
+        # Ticking it stores the current selection for Quick Start; leaving it
+        # unticked never clears a previously saved one, as on every other page.
+        ctk.CTkCheckBox(
+            sidebar,
+            text="Save as default",
+            variable=self._save_default,
+            font=FONT_SMALL,
+        ).grid(row=sidebar_row, column=0, sticky="w", pady=(0, SECTION_PAD_Y))
         sidebar_row += 1
 
         current_group = ""
@@ -381,6 +394,31 @@ class VisualizationPanel(ctk.CTkFrame):
         self._bind_arrow_keys()
         self._populate_cortex_checkboxes()
         self._update_checkbox_availability()
+        self._apply_saved_graph_selection()
+
+    def _apply_saved_graph_selection(self):
+        """Tick the saved graphs, minus any this participant has no data for.
+
+        Runs after availability, which disables and unticks the rest — a saved
+        graph the visit cannot draw would otherwise come back ticked and
+        undrawable.
+        """
+        saved = [
+            key for key in self._controller.get_selected_graphs_default()
+            if key in self._available_keys
+        ]
+        if not saved:
+            return
+        for key in saved:
+            self._check_vars[key].set(True)
+        self._select_all_var.set(self._available_keys.issubset(saved))
+        self._rebuild_nav_list()
+        if self._nav_list:
+            self._nav_index = 0
+            self._show_current()
+        else:
+            self._display_placeholder()
+        self._update_nav_buttons()
 
     # ── Recording-target selection ────────────────────────
 
@@ -908,6 +946,12 @@ class VisualizationPanel(ctk.CTkFrame):
         if not checked:
             self._status_var.set("Please select at least one graph.")
             return
+
+        # Saved on the choice, not on the figures rendering: the user ticked the
+        # box to record which graphs they want, and a builder that fails on this
+        # participant says nothing about that preference.
+        if self._save_default.get():
+            self._controller.save_selected_graphs_default(checked)
 
         # Find checked graphs that haven't been generated yet.
         missing = [

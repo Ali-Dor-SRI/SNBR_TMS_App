@@ -14,6 +14,7 @@ from tkinter import filedialog, StringVar, BooleanVar
 
 import customtkinter as ctk
 
+from core.user_settings import STEP_REDCAP
 from gui.theme import (
     ACCENT_COLOR, ACCENT_HOVER, DISABLED_FG, ERROR_COLOR,
     FONT_BODY, FONT_BUTTON, FONT_HEADING, FONT_SMALL,
@@ -203,7 +204,7 @@ class RedcapPanel(ctk.CTkFrame):
             nav, text="Next", width=100, height=BUTTON_HEIGHT,
             corner_radius=CORNER_RADIUS, font=FONT_BUTTON,
             fg_color=ACCENT_COLOR, hover_color=ACCENT_HOVER,
-            command=self._on_next,
+            command=self._handle_next,
         )
         self._next_btn.grid(row=0, column=2, sticky="e")
 
@@ -263,6 +264,38 @@ class RedcapPanel(ctk.CTkFrame):
         if chosen:
             var.set(chosen)
 
+    # ── Turning the REDCap step off ───────────────────────
+
+    # The export needs all four of these; the .xlsx report is optional, so it
+    # cannot speak for the step as a whole.
+    def _required_rows(self):
+        return (
+            (self._data_var, self._save_data),
+            (self._dict_var, self._save_dict),
+            (self._template_var, self._save_template),
+            (self._export_var, self._save_export),
+        )
+
+    def _turning_step_off(self) -> bool:
+        """True when a required directory is being saved empty.
+
+        REDCap is all-or-nothing — it cannot run without every one of them — so
+        one required directory deliberately saved blank turns the step off.
+        """
+        return any(
+            save.get() and not var.get().strip()
+            for var, save in self._required_rows()
+        )
+
+    def _handle_next(self):
+        """Record whether Quick Start should still run REDCap, then advance."""
+        if any(save.get() for _var, save in self._required_rows()):
+            self._controller.set_step_skipped(
+                STEP_REDCAP, self._turning_step_off(),
+            )
+        if self._on_next is not None:
+            self._on_next()
+
     # ── Refresh ───────────────────────────────────────────
 
     def refresh(self):
@@ -279,8 +312,15 @@ class RedcapPanel(ctk.CTkFrame):
         if defaults.get("xlsx_dir") and not self._xlsx_var.get().strip():
             self._xlsx_var.set(defaults["xlsx_dir"])
 
-        self._status_var.set("")
-        self._status_label.configure(text_color=DISABLED_FG)
+        if self._controller.is_step_skipped(STEP_REDCAP):
+            self._status_var.set(
+                "Quick Start currently skips the REDCap export. Fill the "
+                "directories in and tick 'Save as default' to put it back."
+            )
+            self._status_label.configure(text_color="#F39C12")
+        else:
+            self._status_var.set("")
+            self._status_label.configure(text_color=DISABLED_FG)
 
         # Consume any redirect message from Quick Start
         msg = self._controller.consume_quick_start_message()

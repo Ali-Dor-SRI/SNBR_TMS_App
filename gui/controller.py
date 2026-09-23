@@ -22,6 +22,10 @@ from core.user_settings import (
     KEY_EXCLUDED_MEASUREMENTS, KEY_EXCLUDED_PARTICIPANTS,
     KEY_OUTLIER_BOUNDS,
     KEY_SKIPPED_PAGES,
+    KEY_DATA_MODE, DATA_MODES, KEY_SELECTED_GRAPHS,
+    KEY_SKIPPED_STEPS, QUICK_START_STEPS,
+    STEP_EXPORT_CSV, STEP_EXPORT_PDF, STEP_EMAIL, STEP_REDCAP, STEP_SYNC,
+    DATA_MODE_ARCHIVE_AS_IS, DATA_MODE_ARCHIVE_PLUS_NEW, DATA_MODE_FULL_PARSE,
     KEY_REDCAP_DATA_DIR, KEY_REDCAP_DICT_DIR,
     KEY_REDCAP_TEMPLATE_DIR, KEY_REDCAP_EXPORT_DIR,
     KEY_REDCAP_XLSX_DIR,
@@ -525,8 +529,8 @@ class AppController:
         """
         if kind == "csv":
             return f"{default_dataframe_stem()}.csv"
-        pid, _date = self.get_selected_participant()
-        return f"{default_report_stem(self._selected_study(), pid)}.pdf"
+        pid, date = self.get_selected_participant()
+        return f"{default_report_stem(self._selected_study(), pid, date)}.pdf"
 
     def default_graph_filename(self, graph_label: str) -> str:
         """The filename to offer when saving one figure as a PNG."""
@@ -2635,6 +2639,99 @@ class AppController:
     def get_report_figures(self) -> list:
         return getattr(self, "_report_figures", [])
 
+    # ── Data import mode ──────────────────────────────────
+
+    # Wording matches the radio buttons on the Data Import page.
+    _DATA_MODE_LABELS = {
+        DATA_MODE_ARCHIVE_AS_IS:
+            "Create reports based on previous data frame (archive .csv)",
+        DATA_MODE_ARCHIVE_PLUS_NEW:
+            "Update existing data frame with new visits (MEM + CSP)",
+        DATA_MODE_FULL_PARSE:
+            "Parse .MEM files and create new data frame",
+    }
+
+    def get_data_mode_default(self) -> str:
+        """Return the saved Data Import mode slug, or "" when none is saved."""
+        mode = load_defaults().get(KEY_DATA_MODE, "")
+        return mode if mode in DATA_MODES else ""
+
+    def save_data_mode_default(self, mode: str) -> None:
+        """Persist the Data Import mode Quick Start should use."""
+        if mode not in DATA_MODES:
+            raise ValueError(f"Unknown data import mode: {mode!r}")
+        save_defaults(**{KEY_DATA_MODE: mode})
+
+    def get_data_mode_label(self) -> str:
+        """Describe the saved Data Import mode for the read-only settings page."""
+        mode = self.get_data_mode_default()
+        if not mode:
+            return "(not set — loads the archive .csv, re-parsed if out of date)"
+        return self._DATA_MODE_LABELS[mode]
+
+    # ── Optional Quick Start steps ────────────────────────
+
+    # Only these five are optional. Everything else builds the report, so there
+    # is nothing sensible to skip.
+    STEP_LABELS = {
+        STEP_EXPORT_CSV: "Export: data frame CSV",
+        STEP_EXPORT_PDF: "Export: PDF report",
+        STEP_EMAIL: "Email the report",
+        STEP_REDCAP: "REDCap export",
+        STEP_SYNC: "Backup & sync",
+    }
+
+    def get_skipped_steps(self) -> set[str]:
+        """Optional Quick Start steps the user has turned off."""
+        saved = load_defaults().get(KEY_SKIPPED_STEPS, [])
+        if not isinstance(saved, list):
+            return set()
+        return {str(s) for s in saved if s in QUICK_START_STEPS}
+
+    def is_step_skipped(self, step: str) -> bool:
+        """True if *step* is turned off for automated runs."""
+        return step in self.get_skipped_steps()
+
+    def set_step_skipped(self, step: str, skipped: bool) -> None:
+        """Turn one optional Quick Start step off or back on."""
+        if step not in QUICK_START_STEPS:
+            raise ValueError(f"Not an optional step: {step!r}")
+        steps = self.get_skipped_steps()
+        if skipped:
+            steps.add(step)
+        else:
+            steps.discard(step)
+        # save_defaults drops falsy values, so an empty set clears the key.
+        save_defaults(**{KEY_SKIPPED_STEPS: sorted(steps)})
+
+    def skipped_step_labels(self) -> list[str]:
+        """Human names of the turned-off steps, in a stable order."""
+        skipped = self.get_skipped_steps()
+        return [
+            label for step, label in self.STEP_LABELS.items()
+            if step in skipped
+        ]
+
+    # ── Saved graph selection ─────────────────────────────
+
+    def get_selected_graphs_default(self) -> list[str]:
+        """Graph keys saved for Quick Start, in registry order ([] when unset).
+
+        Filtered against the registry, so a key saved by an older version that
+        no longer exists drops out instead of failing a lookup later.
+        """
+        from gui.visualization_panel import GRAPH_REGISTRY
+
+        saved = load_defaults().get(KEY_SELECTED_GRAPHS, [])
+        if not isinstance(saved, list):
+            return []
+        wanted = {str(k) for k in saved}
+        return [e.key for e in GRAPH_REGISTRY if e.key in wanted]
+
+    def save_selected_graphs_default(self, keys: list[str]) -> None:
+        """Persist the graphs Quick Start should put in the report."""
+        save_defaults(**{KEY_SELECTED_GRAPHS: [str(k) for k in keys]})
+
     # ── Quick Start ─────────────────────────────────────────
 
     def set_quick_start_message(self, msg: str) -> None:
@@ -2662,23 +2759,29 @@ class AppController:
             )
             return "file_panel"
 
+        # A saved full parse builds the frame from the MEM folders alone, so it
+        # needs no archive; both archive modes (and the unset default) do.
         csv_file = saved.get(KEY_CSV_FILE, "")
-        if not csv_file:
+        if not csv_file and saved.get(KEY_DATA_MODE, "") != DATA_MODE_FULL_PARSE:
             self._quick_start_message = (
                 "No default CSV file saved. "
                 "Quick Start requires a saved CSV path."
             )
             return "file_panel"
 
-        if not Path(csv_file).is_file():
+        if csv_file and not Path(csv_file).is_file():
             self._quick_start_message = (
                 f"Saved CSV file not found:\n{csv_file}"
             )
             return "file_panel"
 
+        # A step the user turned off needs no paths — that is what turning it
+        # off means, so demanding them here would make it unreachable.
+        skipped = self.get_skipped_steps()
+        export_off = {STEP_EXPORT_CSV, STEP_EXPORT_PDF} <= skipped
         export_csv = saved.get(KEY_EXPORT_CSV, "")
         export_pdf = saved.get(KEY_EXPORT_PDF, "")
-        if not export_csv and not export_pdf:
+        if not export_csv and not export_pdf and not export_off:
             self._quick_start_message = (
                 "No default export paths saved. "
                 "Please set export paths and save them as default."
@@ -2689,6 +2792,8 @@ class AppController:
         rc_dict = saved.get(KEY_REDCAP_DICT_DIR, "")
         rc_tpl = saved.get(KEY_REDCAP_TEMPLATE_DIR, "")
         rc_out = saved.get(KEY_REDCAP_EXPORT_DIR, "")
+        if STEP_REDCAP in skipped:
+            return None
         if not (rc_data and rc_dict and rc_tpl and rc_out):
             self._quick_start_message = (
                 "No default REDCap directories saved. "
@@ -2951,6 +3056,7 @@ class AppController:
         """
         missing: list[str] = []
         saved = load_defaults()
+        skipped_steps = self.get_skipped_steps()
 
         for idx in range(from_index, to_index):
             if idx <= 0:
@@ -2960,7 +3066,9 @@ class AppController:
                     missing.append("Import Settings: No default MEM directory.")
                 csv_file = saved.get(KEY_CSV_FILE, "")
                 if not csv_file:
-                    missing.append("Import Settings: No default CSV file.")
+                    # A saved full parse reads the MEM folders alone.
+                    if saved.get(KEY_DATA_MODE, "") != DATA_MODE_FULL_PARSE:
+                        missing.append("Import Settings: No default CSV file.")
                 elif not Path(csv_file).is_file():
                     missing.append(
                         f"Import Settings: CSV file not found: {csv_file}"
@@ -2976,12 +3084,15 @@ class AppController:
             elif idx == 6:  # export
                 csv_out = saved.get(KEY_EXPORT_CSV, "")
                 pdf_out = saved.get(KEY_EXPORT_PDF, "")
-                if not csv_out and not pdf_out:
+                export_off = {STEP_EXPORT_CSV, STEP_EXPORT_PDF} <= skipped_steps
+                if not csv_out and not pdf_out and not export_off:
                     missing.append(
                         "Export: No default CSV or PDF export path."
                     )
             elif idx == 7:  # email — opt-in, never required
                 pass
+            elif idx == 8 and STEP_REDCAP in skipped_steps:
+                pass  # turned off, so its directories are not required
             elif idx == 8:  # redcap
                 for key, label in [
                     (KEY_REDCAP_DATA_DIR, "REDCap Data Directory"),
@@ -3035,9 +3146,12 @@ class AppController:
             "csv_export": "",
             "pdf_export": "",
             "graphs": [],
+            "graphs_skipped": [],
+            "graphs_fell_back": False,
             "figure_count": 0,
             "sync_pairs": [],
             "sync_result": None,
+            "skipped_steps": self.skipped_step_labels(),
             "redcap_summary": None,
             "email_sent": False,
             "email_to": [],
@@ -3072,19 +3186,28 @@ class AppController:
             )
             summary["csv_file"] = saved.get(KEY_CSV_FILE, "")
 
-        # Phase 2 — data_mode: load CSV
+        # Phase 2 — data_mode: build the frame the way the user saved
         if from_index <= 2 < to_index:
+            mode = self.get_data_mode_default()
+            if mode in (DATA_MODE_ARCHIVE_PLUS_NEW, DATA_MODE_FULL_PARSE):
+                _status("Parsing MEM files...")
+                self.parse_and_build()
             # If the saved archive predates newer parser columns (e.g. SR/SD)
             # and a MEM folder is available, do an incremental build so those
             # columns get backfilled — otherwise this automated report would
-            # silently omit the SR/SD figures.
-            if self._mem_paths and not csv_schema_is_current(self._csv_path):
+            # silently omit the SR/SD figures. This outranks a saved archive
+            # mode: the user asked for speed, not for missing graphs.
+            elif self._mem_paths and not csv_schema_is_current(self._csv_path):
                 _status("Archive out of date — re-parsing MEM files to add SR/SD...")
                 self.parse_and_build()
                 summary["schema_rebuilt"] = True
             else:
                 _status("Loading CSV data...")
-                self.load_csv_dataframe()
+                # "Archive as-is" is the page's fast path — it touches no
+                # folders at all, CMAP included.
+                self.load_csv_dataframe(
+                    merge_cmap=mode != DATA_MODE_ARCHIVE_AS_IS,
+                )
             df = self.get_dataframe()
             if df is None or df.empty:
                 raise ValueError("Loaded CSV contains no data.")
@@ -3137,6 +3260,22 @@ class AppController:
                 if self.has_data_for_graph(entry.graph_type, entry.measure):
                     available_keys.append(entry.key)
 
+            # A saved selection wins, minus anything this participant has no
+            # data for. If none of the saved graphs apply to them, fall back to
+            # every available graph rather than exporting a lone cover page.
+            report_keys = available_keys
+            saved_keys = self.get_selected_graphs_default()
+            if saved_keys:
+                labels = {e.key: e.label for e in GRAPH_REGISTRY}
+                summary["graphs_skipped"] = [
+                    labels[k] for k in saved_keys if k not in available_keys
+                ]
+                wanted = [k for k in saved_keys if k in available_keys]
+                if wanted:
+                    report_keys = wanted
+                else:
+                    summary["graphs_fell_back"] = True
+
             all_items: list = []
             _status("Generating header figure...")
             try:
@@ -3147,8 +3286,8 @@ class AppController:
             except Exception:
                 pass
 
-            total = len(available_keys)
-            for idx, key in enumerate(available_keys, 1):
+            total = len(report_keys)
+            for idx, key in enumerate(report_keys, 1):
                 _status(f"Generating figures {idx}/{total}...")
                 entry = next(e for e in GRAPH_REGISTRY if e.key == key)
                 try:
@@ -3192,12 +3331,12 @@ class AppController:
             if not all_items:
                 raise ValueError("Could not generate any figures.")
 
-            self.set_selected_graphs(available_keys)
+            self.set_selected_graphs(report_keys)
             self.set_report_figures(all_items)
 
             summary["graphs"] = [
                 next(e for e in GRAPH_REGISTRY if e.key == k).label
-                for k in available_keys
+                for k in report_keys
             ]
             summary["figure_count"] = len(all_items)
 
@@ -3207,8 +3346,13 @@ class AppController:
             # Quick Start still produces both files for a user who has never
             # saved an export default.
             export_paths = self.get_default_export_paths()
-            csv_path = self.resolve_export_path("csv", export_paths.get("csv", ""))
-            pdf_path = self.resolve_export_path("pdf", export_paths.get("pdf", ""))
+            skipped = self.get_skipped_steps()
+            csv_path = "" if STEP_EXPORT_CSV in skipped else self.resolve_export_path(
+                "csv", export_paths.get("csv", ""),
+            )
+            pdf_path = "" if STEP_EXPORT_PDF in skipped else self.resolve_export_path(
+                "pdf", export_paths.get("pdf", ""),
+            )
 
             if csv_path:
                 _status("Exporting CSV...")
@@ -3227,7 +3371,12 @@ class AppController:
             summary["pdf_export"] = pdf_path
 
         # Phase 7 — email (opt-in, auto-send only with full saved defaults)
-        if from_index <= 7 < to_index:
+        if from_index <= 7 < to_index and self.is_step_skipped(STEP_EMAIL):
+            summary["email_sent"] = False
+            summary["email_error"] = (
+                "Skipped — turned off on the Email page."
+            )
+        elif from_index <= 7 < to_index:
             email_defaults = self.get_email_defaults()
             to_list = [a.strip() for a in email_defaults["to"].split(",") if a.strip()]
             cc_list = [a.strip() for a in email_defaults["cc"].split(",") if a.strip()]
@@ -3267,7 +3416,7 @@ class AppController:
                 summary["email_error"] = "Skipped (no saved email defaults)."
 
         # Phase 8 — redcap
-        if from_index <= 8 < to_index:
+        if from_index <= 8 < to_index and not self.is_step_skipped(STEP_REDCAP):
             rc_data = saved.get(KEY_REDCAP_DATA_DIR, "")
             rc_dict = saved.get(KEY_REDCAP_DICT_DIR, "")
             rc_tpl = saved.get(KEY_REDCAP_TEMPLATE_DIR, "")
@@ -3285,7 +3434,7 @@ class AppController:
                     pass  # best-effort
 
         # Phase 9 — sync
-        if from_index <= 9 < to_index:
+        if from_index <= 9 < to_index and not self.is_step_skipped(STEP_SYNC):
             sync_pairs_data = self.get_sync_defaults()
             if sync_pairs_data:
                 _status("Syncing files...")
