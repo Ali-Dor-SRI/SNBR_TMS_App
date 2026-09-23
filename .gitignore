@@ -19,12 +19,16 @@ dist_macos/
 
 # ── User-specific settings (machine paths, email, exclusions) ──
 core/saved_defaults.json
+dispatch/saved_settings.json
 
 # ── Runtime-generated sync log ─────────────────────────
 back_up_sync/sync_log.txt
 
 # ── Generated test outputs (reports, parsed CSVs, previews) ──
 tests/output/
+
+# ── Icon generator scratch/preview renders (the assets themselves are tracked) ──
+icons/**/._*
 
 # ── OS / editor cruft ──────────────────────────────────
 .DS_Store

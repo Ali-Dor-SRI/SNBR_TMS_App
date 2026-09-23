@@ -1,6 +1,8 @@
 """Main application window for the SNBR TMS App."""
 
+import sys
 import threading
+from pathlib import Path
 
 import customtkinter as ctk
 
@@ -43,6 +45,20 @@ _LABEL_TO_NAME = {label: name for name, label in PAGE_LABELS}
 _NAME_TO_LABEL = {name: label for name, label in PAGE_LABELS}
 
 
+def _resolve_logo_dir() -> Path:
+    """Return the icons/logo directory for both source and PyInstaller runs.
+
+    In a bundle ``sys._MEIPASS`` is the extracted data root, which is where
+    the spec's ``('icons', 'icons')`` entry lands. Resolved here rather than
+    borrowed from ``reports.pdf_layout`` so the GUI keeps its one-way import
+    rule: gui/ does not reach into the backend packages.
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass) / "icons" / "logo"
+    return Path(__file__).resolve().parent.parent / "icons" / "logo"
+
+
 class TMSApp(ctk.CTk):
     """Root window — manages page navigation and the theme toggle."""
 
@@ -58,6 +74,7 @@ class TMSApp(ctk.CTk):
         ctk.set_default_color_theme("blue")
 
         self.title("SNBR TMS App")
+        self._apply_window_icon()
         self.geometry(f"{self.WIDTH}x{self.HEIGHT}")
         self.minsize(self.MIN_WIDTH, self.MIN_HEIGHT)
 
@@ -79,6 +96,21 @@ class TMSApp(ctk.CTk):
         self._build_container()
         self._bind_keyboard_shortcuts()
         self._show_page("welcome")
+
+    def _apply_window_icon(self) -> None:
+        """Put the app mark on the window and the taskbar button.
+
+        Windows only: the .ico carries every size Windows asks for, while
+        ``iconbitmap`` is unreliable elsewhere and the macOS build takes its
+        icon from the .app bundle instead. Purely cosmetic, so a missing or
+        unreadable file must not stop the app opening.
+        """
+        if not sys.platform.startswith("win"):
+            return
+        try:
+            self.iconbitmap(str(_resolve_logo_dir() / "logo.ico"))
+        except Exception:
+            pass
 
     # ── Toolbar ────────────────────────────────────────────
     def _build_toolbar(self):

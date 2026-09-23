@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64"
+     role="img" aria-label="Figure-of-eight TMS coil with a motor evoked potential">
+  <title>SNBR TMS</title>
+  <!-- Figure-of-eight coil: two tangent windings, each opened where the trace crosses -->
+  <g fill="none" stroke="#E8EEF6" stroke-width="3.4" stroke-linecap="round">
+    <path d="M 10.33 29.34 A 11 11 0 1 1 10.33 34.66"/>
+    <path d="M 53.67 34.66 A 11 11 0 1 1 53.67 29.34"/>
+  </g>
+  <!-- Motor evoked potential, deflecting at the junction: where the coil's field peaks -->
+  <path d="M 3 32 H 26.5 L 28.5 34.5 L 31 18 L 36 46 L 38.5 32 H 61"
+        fill="none" stroke="#2DD4BF" stroke-width="3.4"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

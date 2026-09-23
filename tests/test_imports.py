@@ -62,6 +62,7 @@ def test_the_module_list_is_not_empty_or_truncated():
         "main", "gui.app", "gui.controller", "parser.mem_parser",
         "parser._common", "processing.df_builder", "reports.report_builder",
         "emailing.pdf_letterhead", "core.user_settings", "back_up_sync.file_sync",
+        "dispatch_main", "dispatch.ledger", "dispatch_gui.app",
     ):
         assert expected in APP_MODULES, f"{expected} missing from the module list"
 
@@ -79,11 +80,15 @@ def test_importing_main_does_not_launch_the_app():
     """main.py holds the mainloop; importing it must not start one."""
     module = importlib.import_module("main")
     assert hasattr(module, "main"), "main.py must keep its main() entry point"
+    dispatch = importlib.import_module("dispatch_main")
+    assert hasattr(dispatch, "main"), "dispatch_main.py must keep its main() entry point"
 
 
 @pytest.mark.parametrize("module_name,attribute", [
     ("parser.cmap_parser", "pdfplumber"),
     ("emailing.credentials", "keyring"),
+    ("dispatch.stamp", "pypdf"),
+    ("dispatch.roster", "openpyxl"),
 ])
 def test_optional_dependencies_are_not_imported_at_module_scope(module_name, attribute):
     """Importing these at the top would break a machine without the package.
@@ -100,6 +105,7 @@ def test_optional_dependencies_are_not_imported_at_module_scope(module_name, att
 
 BACKEND_PACKAGES = (
     "parser", "processing", "reports", "emailing", "back_up_sync", "core",
+    "dispatch",
 )
 
 
@@ -114,7 +120,9 @@ def test_the_backend_never_imports_the_gui():
     import json
     import subprocess
 
-    backend = [n for n in APP_MODULES if n.startswith(BACKEND_PACKAGES)]
+    # By top-level package, not string prefix: "dispatch_gui" starts with
+    # "dispatch" but is a GUI package.
+    backend = [n for n in APP_MODULES if n.split(".")[0] in BACKEND_PACKAGES]
     assert backend, "no backend modules found -- discovery is broken"
 
     program = (

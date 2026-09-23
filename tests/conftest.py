@@ -68,6 +68,27 @@ def pytest_collection_modifyitems(config, items):
 # Settings isolation
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(scope="session")
+def tk_root():
+    """One Tk root for the whole session, or a skip when there is no display.
+
+    Tcl cannot be re-initialised indefinitely in one process: past some number
+    of roots it fails with "Can't find a usable tk.tcl" and every remaining
+    display-dependent test skips itself, in this file and in whatever runs
+    next. Widget-level tests should build their panels on this root and destroy
+    the panels, not the root.
+    """
+    try:
+        import customtkinter as ctk
+
+        root = ctk.CTk()
+    except Exception as exc:  # pragma: no cover - headless CI
+        pytest.skip(f"no display available: {exc}")
+    root.withdraw()
+    yield root
+    root.destroy()
+
+
 @pytest.fixture(autouse=True)
 def _isolate_user_settings(tmp_path, monkeypatch):
     """Point core.user_settings at a throwaway file for every test.
@@ -80,5 +101,12 @@ def _isolate_user_settings(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         user_settings, "_SETTINGS_FILE", tmp_path / "saved_defaults.json",
+    )
+    # The dispatch app keeps its own file (dispatch/saved_settings.json in
+    # development) under the same rule.
+    from dispatch import settings as dispatch_settings
+
+    monkeypatch.setattr(
+        dispatch_settings, "_SETTINGS_FILE", tmp_path / "dispatch_settings.json",
     )
     yield

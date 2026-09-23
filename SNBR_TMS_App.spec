@@ -39,7 +39,8 @@ a = Analysis(
     datas=[
         # CustomTkinter theme/assets
         (ctk_path, 'customtkinter/'),
-        # Institutional letterhead PNGs used on the report cover page
+        # Institutional letterhead PNGs for the report cover page, plus
+        # icons/logo/ (the app mark) used for the runtime window icon
         ('icons', 'icons'),
     ],
     hiddenimports=[
@@ -84,5 +85,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,       # drop a .ico in the project and set its path to customise
+    icon='icons/logo/logo.ico',   # the app mark; regenerate with scripts/generate_logo.py
 )
